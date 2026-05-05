@@ -5,9 +5,18 @@ Hai mode:
   owned_only=True  → chỉ commander có trong collection
   owned_only=False → tất cả commander hợp lệ, ưu tiên commander
                      giúp tái dùng nhiều card nhất từ collection
+
+FIX Bug 1 — O(n×API) pre-filter:
+  Trước khi gọi EDHREC, loại bỏ tất cả commanders có color identity
+  không phải subset của màu trong collection. Giảm 1847 → ~50-200 candidates
+  tùy collection, tránh hàng nghìn EDHREC calls lãng phí.
+
+  Ví dụ: collection chỉ có card W/U/B → loại hết commander cần G hoặc R.
+  Nếu collection rỗng màu (chỉ toàn colorless) → không lọc để tránh loại hết.
 """
 
 import json
+import math
 from dataclasses import dataclass, field
 from enrichers import scryfall, edhrec
 from db import cache
@@ -31,14 +40,18 @@ def pick_commanders(
     owned_only: bool = False,
 ) -> list[CommanderScore]:
     """
-    Score tất cả commanders và trả về top N.
+    Score commanders và trả về top N.
+
+    Luồng xử lý:
+      1. Lấy màu trong collection từ Scryfall cache
+      2. Pre-filter: loại commanders có màu ngoài collection colors
+      3. Với owned_only: chỉ giữ commanders có trong collection
+      4. Gọi EDHREC chỉ cho candidates còn lại
+      5. Score + sort + trả về top N
 
     Args:
         top_n: số commander muốn trả về
         owned_only: chỉ xét commander đang có trong collection
-
-    Returns:
-        list[CommanderScore] sorted by composite_score desc
     """
     collection_names = cache.get_collection_names()
     if not collection_names:
@@ -50,12 +63,24 @@ def pick_commanders(
         scryfall.fetch_all_commanders()
         all_commanders = cache.get_all_commanders()
 
+    # --- Pre-filter bước 1: theo ownership ---
     candidates = []
     for cmd in all_commanders:
         is_owned = cmd["name"] in collection_names
         if owned_only and not is_owned:
             continue
         candidates.append(cmd)
+
+    # --- Pre-filter bước 2: theo color identity của collection ---
+    # Chỉ áp dụng khi không phải owned_only (đã filter rồi)
+    # và khi collection đủ lớn để có ý nghĩa
+    if not owned_only and len(candidates) > 200:
+        collection_colors = _infer_collection_colors(collection_names)
+        if collection_colors:  # bỏ qua nếu colorless hoàn toàn
+            before = len(candidates)
+            candidates = _filter_by_color_identity(candidates, collection_colors)
+            print(f"  Color pre-filter: {before} → {len(candidates)} commanders "
+                  f"(collection màu: {sorted(collection_colors)})")
 
     print(f"  Đang score {len(candidates)} commanders...")
 
@@ -68,12 +93,47 @@ def pick_commanders(
     return scored[:top_n]
 
 
+def _infer_collection_colors(collection_names: set[str]) -> set[str]:
+    """
+    Suy ra tập màu của collection từ Scryfall cache.
+    Trả về union của color_identity tất cả card trong collection.
+    Chỉ tính card đã có trong scryfall cache (không fetch mới).
+    """
+    colors: set[str] = set()
+    with cache.get_conn() as conn:
+        placeholders = ",".join("?" * len(collection_names))
+        rows = conn.execute(
+            f"SELECT color_identity FROM scryfall_cards WHERE name IN ({placeholders})",
+            list(collection_names),
+        ).fetchall()
+    for row in rows:
+        ci = json.loads(row["color_identity"] or "[]")
+        colors.update(ci)
+    return colors
+
+
+def _filter_by_color_identity(
+    commanders: list, collection_colors: set[str]
+) -> list:
+    """
+    Giữ lại commanders có color identity là subset của collection_colors.
+    Commander colorless (CI=[]) luôn được giữ lại.
+    Commander 5-color luôn được giữ lại nếu collection có đủ 5 màu.
+    """
+    filtered = []
+    for cmd in commanders:
+        ci = set(json.loads(cmd["color_identity"] or "[]"))
+        if not ci or ci.issubset(collection_colors):
+            filtered.append(cmd)
+    return filtered
+
+
 def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
     slug = cmd["slug"]
     color_identity = json.loads(cmd["color_identity"] or "[]")
     is_owned = cmd["name"] in collection_names
 
-    # Lấy EDHREC cards cho commander này
+    # Lấy EDHREC cards cho commander này (từ cache nếu có)
     edhrec_cards = edhrec.get_commander_cards(slug)
     edhrec_card_names = {c["card_name"] for c in edhrec_cards}
     edhrec_num_decks = edhrec_cards[0]["potential_decks"] if edhrec_cards else 0
@@ -99,14 +159,12 @@ def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
         / max(overlap_count, 1)
     )
 
-    import math
     popularity_score = math.log10(max(edhrec_num_decks, 1)) / 6  # normalize to ~0-1
-
     owned_bonus = 0.10 if is_owned else 0.0
 
     composite = (
         0.40 * overlap_pct
-        + 0.30 * min(avg_synergy * 5, 1.0)  # synergy thường 0-0.5, scale lên
+        + 0.30 * min(avg_synergy * 5, 1.0)
         + 0.20 * popularity_score
         + owned_bonus
     )

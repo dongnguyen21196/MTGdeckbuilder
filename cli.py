@@ -110,16 +110,17 @@ def collection_cmd(do_list, stats):
 @click.option("--top", default=5, show_default=True, help="Số deck trong output ranked")
 @click.option("--include-unowned-commanders", is_flag=True, default=False,
               help="Gợi ý cả commander chưa có trong collection")
+@click.option("--partner", default=None, help="Tên commander thứ hai (cho partner pairs)")
 @click.option("--save", default=None, help="Lưu output ra file (decklist/buylist)")
-def build_cmd(commander, output, top, include_unowned_commanders, save):
+def build_cmd(commander, output, top, include_unowned_commanders, partner, save):
     """Build và gợi ý EDH deck từ collection."""
     from engine.deck_builder import build_deck
 
     if commander:
         # Build deck cụ thể
         slug = scryfall._to_slug(commander)
-        click.echo(f"\nBuilding deck cho {commander}...")
-        deck = build_deck(commander, slug)
+        click.echo(f"\nBuilding deck cho {commander}" + (f" + {partner}" if partner else "") + "...")
+        deck = build_deck(commander, slug, partner_name=partner)
 
         if output == "decklist":
             from outputs.decklist import print_decklist, export_decklist, default_filename

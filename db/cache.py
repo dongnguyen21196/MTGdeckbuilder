@@ -82,6 +82,8 @@ def init_db():
                 slug            TEXT UNIQUE,
                 color_identity  TEXT,   -- JSON array
                 is_legal        INTEGER NOT NULL DEFAULT 1,
+                is_partner      INTEGER NOT NULL DEFAULT 0,
+                partner_name    TEXT,   -- tên commander partner (nếu có)
                 fetched_at      TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
@@ -206,10 +208,13 @@ def update_banned_list(names: list[str]):
 def upsert_commanders(commanders: list[dict]):
     with get_conn() as conn:
         conn.executemany(
-            """INSERT INTO commanders (name, slug, color_identity, is_legal, fetched_at)
-               VALUES (:name, :slug, :color_identity, 1, datetime('now'))
+            """INSERT INTO commanders (name, slug, color_identity, is_legal,
+                                         is_partner, partner_name, fetched_at)
+               VALUES (:name, :slug, :color_identity, 1,
+                       :is_partner, :partner_name, datetime('now'))
                ON CONFLICT(name) DO UPDATE SET
                  slug=excluded.slug, color_identity=excluded.color_identity,
+                 is_partner=excluded.is_partner, partner_name=excluded.partner_name,
                  fetched_at=excluded.fetched_at""",
             commanders,
         )

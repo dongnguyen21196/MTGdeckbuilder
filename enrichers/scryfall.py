@@ -99,7 +99,11 @@ def _normalize_card(card: dict) -> dict:
 def fetch_all_commanders() -> list[dict]:
     """
     Lấy tất cả commander hợp lệ từ Scryfall.
-    Query: is:commander format:commander legal:commander
+
+    FIX Bug 4 — Partner commanders:
+      Scryfall trả về field all_parts[] cho double-faced cards và partner pairs.
+      Với partner: lưu is_partner=1 và partner_name để engine biết cần 2 commander.
+      EDHREC slug cho partner pair: partner1-partner2 (sorted alphabetically).
     """
     print("Fetching danh sách commanders từ Scryfall...")
     commanders = []
@@ -116,19 +120,44 @@ def fetch_all_commanders() -> list[dict]:
         data = resp.json()
 
         for card in data.get("data", []):
+            name = card["name"]
+            color_identity = card.get("color_identity", [])
+
+            # Detect partner commanders từ keywords
+            keywords = card.get("keywords", [])
+            oracle = card.get("oracle_text", "")
+            is_partner = (
+                "Partner" in keywords
+                or "Partner with" in keywords
+                or "partner" in oracle.lower()
+            )
+
             commanders.append({
-                "name": card["name"],
-                "slug": _to_slug(card["name"]),
-                "color_identity": json.dumps(card.get("color_identity", [])),
+                "name": name,
+                "slug": _to_slug(name),
+                "color_identity": json.dumps(color_identity),
+                "is_partner": 1 if is_partner else 0,
+                "partner_name": None,  # sẽ set khi user chọn partner pair
             })
 
         url = data.get("next_page")
-        params = {}  # next_page URL đã có params
+        params = {}
         time.sleep(SLEEP_BETWEEN_BATCHES)
 
-    print(f"  Tìm thấy {len(commanders)} commanders.")
+    print(f"  Tìm thấy {len(commanders)} commanders ({sum(1 for c in commanders if c['is_partner'])} có partner ability).")
     cache.upsert_commanders(commanders)
     return commanders
+
+
+def make_partner_slug(name1: str, name2: str) -> str:
+    """
+    Tạo EDHREC slug cho partner pair.
+    EDHREC format: slug1-slug2 với tên được sort alphabetically.
+    Ví dụ: Thrasios + Tymna → thrasios-triton-hero-tymna-the-weaver
+    """
+    slug1, slug2 = _to_slug(name1), _to_slug(name2)
+    pair = sorted([slug1, slug2])
+    return f"{pair[0]}-{pair[1]}"
 
 
 def fetch_banned_list() -> list[str]:
@@ -164,10 +193,24 @@ def is_commander_legal(card_data: dict) -> bool:
 
 
 def _to_slug(name: str) -> str:
-    """Chuyển card name thành EDHREC slug format."""
+    """
+    Chuyển card name thành EDHREC slug format.
+
+    FIX Bug 4 edge cases:
+      - Dấu nháy đơn (Oko, Thief of Crowns → oko-thief-of-crowns)
+      - Dấu hai chấm (Atraxa, Praetors Voice → atraxa-praetors-voice)
+      - Ký tự đặc biệt (Urza's Saga → urzas-saga)
+      - Double-faced card: chỉ lấy phần trước // (Delina // đi theo front face)
+      - Dấu gạch ngang trailing/leading bị trim
+    """
     import re
+    # Double-faced: chỉ dùng front face
+    if " // " in name:
+        name = name.split(" // ")[0].strip()
     slug = name.lower()
-    slug = re.sub(r"[',\.]", "", slug)
+    # Xóa ký tự đặc biệt phổ biến trong MTG card names
+    slug = re.sub(r"[',\.!?:;]", "", slug)  # Remove common MTG punctuation
+    # Thay khoảng trắng và ký tự còn lại bằng dấu gạch ngang
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = slug.strip("-")
     return slug
