@@ -67,11 +67,14 @@ def import_collection(csv_path, api):
     total_qty = sum(c["quantity"] for c in cards)
     click.echo(f"\nImport thành công: {total_unique} unique cards, {total_qty} total copies.")
 
-    # Tự động enrich với Scryfall sau khi import
+    # Enrich với Scryfall (oracle data + prices)
     click.echo("\nEnriching với Scryfall data...")
     names = list({c["name"] for c in cards})
     scryfall.enrich_cards(names)
-    click.echo("Scryfall enrichment hoàn thành.")
+
+    # FIX 1: Cập nhật oracle_name mapping sau khi có Scryfall data
+    cache.refresh_collection_oracle_names()
+    click.echo("Scryfall enrichment hoàn thành. Oracle names đã được normalize.")
 
 
 # ── collection ────────────────────────────────────────────────────────────────
@@ -175,7 +178,11 @@ def build_cmd(commander, output, top, include_unowned_commanders, partner, save)
 @click.option("--banned-list", is_flag=True, default=False)
 @click.option("--commanders", is_flag=True, default=False)
 @click.option("--clear-edhrec-cache", is_flag=True, default=False)
-def update_cmd(banned_list, commanders, clear_edhrec_cache):
+@click.option("--refresh-prices", is_flag=True, default=False,
+              help="Force refresh giá tất cả card trong collection (bỏ qua TTL)")
+@click.option("--db-stats", is_flag=True, default=False,
+              help="Hiển thị thống kê database")
+def update_cmd(banned_list, commanders, clear_edhrec_cache, refresh_prices, db_stats):
     """Update data từ external sources."""
     if banned_list:
         scryfall.fetch_banned_list()
@@ -190,7 +197,25 @@ def update_cmd(banned_list, commanders, clear_edhrec_cache):
             conn.execute("DELETE FROM edhrec_data")
         click.echo("EDHREC cache đã được xóa.")
 
-    if not any([banned_list, commanders, clear_edhrec_cache]):
+    if refresh_prices:
+        # Xóa price cache để force refetch toàn bộ
+        with cache.get_conn() as conn:
+            deleted = conn.execute("DELETE FROM scryfall_prices").rowcount
+        click.echo(f"Đã xóa {deleted} price entries. Sẽ được refresh lần build tiếp theo.")
+        # Trigger enrich ngay cho collection hiện tại
+        collection_names = list(cache.get_collection_raw_names())
+        if collection_names:
+            click.echo(f"Refreshing prices cho {len(collection_names)} cards...")
+            scryfall.enrich_cards(collection_names)
+            click.echo("Price refresh hoàn thành.")
+
+    if db_stats:
+        stats = cache.get_db_stats()
+        click.echo("\nDatabase stats:")
+        for k, v in stats.items():
+            click.echo(f"  {k:<20} {v}")
+
+    if not any([banned_list, commanders, clear_edhrec_cache, refresh_prices, db_stats]):
         click.echo("Cần chỉ định ít nhất một option. Xem --help")
 
 

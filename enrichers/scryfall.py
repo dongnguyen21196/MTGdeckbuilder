@@ -1,118 +1,212 @@
 """
 enrichers/scryfall.py — Lấy card data từ Scryfall API.
 
-Scryfall API docs: https://scryfall.com/docs/api
-Rate limit: 50–100ms delay, max 10 req/sec.
-Dùng /cards/collection endpoint để batch 75 cards/request.
+FIX 1 — Reprint dedup:
+  _normalize_card() giờ extract thêm oracle_name từ Scryfall response.
+  oracle_name = card["name"] cho single-face cards.
+  oracle_name = card["card_faces"][0]["name"] cho double-faced cards.
+  Dùng để normalize ownership check cross-reprint.
+
+FIX 2 — Price TTL tách riêng:
+  enrich_cards() tách thành 2 pass:
+    Pass 1: fetch oracle data (CMC, type, CI...) nếu missing/stale (30 ngày)
+    Pass 2: refresh prices nếu stale (7 ngày) dù oracle data còn fresh
+  Cho phép buylist luôn hiển thị giá gần đúng nhất mà không force
+  re-fetch toàn bộ oracle data mỗi tuần.
 """
 
 import json
+import re
 import time
 import requests
 from db import cache
 
-SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection"
-SCRYFALL_BULK_COMMANDERS_URL = "https://api.scryfall.com/cards/search"
-BATCH_SIZE = 75
-SLEEP_BETWEEN_BATCHES = 0.1
+SCRYFALL_COLLECTION_URL  = "https://api.scryfall.com/cards/collection"
+SCRYFALL_BULK_SEARCH_URL = "https://api.scryfall.com/cards/search"
+BATCH_SIZE               = 75
+SLEEP_BETWEEN_BATCHES    = 0.1
 
 
 def enrich_cards(card_names: list[str]) -> dict[str, dict]:
     """
     Lấy Scryfall data cho danh sách card, ưu tiên cache.
 
+    FIX 2: Hai pass riêng biệt:
+      - Pass 1: oracle data (type, CI, oracle text...) — cache 30 ngày
+      - Pass 2: price refresh — cache 7 ngày, chạy độc lập với pass 1
+
     Returns:
-        dict: {card_name: scryfall_data}
+        dict: {card_name: merged_data_with_price}
     """
-    missing = cache.get_missing_scryfall_cards(card_names)
+    # Pass 1: Oracle data
+    missing_oracle = cache.get_missing_scryfall_cards(card_names)
+    if missing_oracle:
+        print(f"  Fetching oracle data: {len(missing_oracle)} cards từ Scryfall...")
+        fetched = _batch_fetch_oracle(missing_oracle)
+        for data in fetched.values():
+            cache.upsert_scryfall_card(data)
+            # Lưu price từ cùng response luôn (tận dụng API call)
+            oracle_name = data.get("oracle_name") or data["name"]
+            prices = data.pop("_prices", {})
+            cache.upsert_price(oracle_name, prices.get("usd"), prices.get("usd_foil"), prices.get("eur"))
+        # Sau khi có oracle_name mới, cập nhật collection oracle mapping
+        cache.refresh_collection_oracle_names()
 
-    if missing:
-        print(f"  Fetching {len(missing)} cards từ Scryfall...")
-        fetched = _batch_fetch(missing)
-        for card_data in fetched.values():
-            cache.upsert_scryfall_card(card_data)
+    # Pass 2: Price refresh cho cards đã có oracle nhưng giá stale
+    all_oracle_names = []
+    for name in card_names:
+        row = cache.get_scryfall_card(name)
+        if row:
+            all_oracle_names.append(row["oracle_name"] or name)
 
+    stale_prices = cache.get_stale_price_cards(list(set(all_oracle_names)))
+    if stale_prices:
+        # Lấy printing names tương ứng để fetch
+        stale_printing_names = []
+        for name in card_names:
+            row = cache.get_scryfall_card(name)
+            if row and (row["oracle_name"] or name) in stale_prices:
+                stale_printing_names.append(name)
+
+        if stale_printing_names:
+            print(f"  Refreshing prices: {len(stale_printing_names)} cards...")
+            price_data = _batch_fetch_prices_only(stale_printing_names)
+            for oracle_name, prices in price_data.items():
+                cache.upsert_price(oracle_name, prices.get("usd"), prices.get("usd_foil"), prices.get("eur"))
+
+    # Assemble kết quả từ cache
     result = {}
     for name in card_names:
         row = cache.get_scryfall_card(name)
         if row:
-            result[name] = dict(row)
+            d = dict(row)
+            oracle_name = d.get("oracle_name") or name
+            d["price_usd"] = cache.get_price_usd(oracle_name)
+            result[name] = d
     return result
 
 
-def _batch_fetch(names: list[str]) -> dict[str, dict]:
-    """Batch fetch qua /cards/collection, 75 card mỗi lần."""
+def _batch_fetch_oracle(names: list[str]) -> dict[str, dict]:
+    """Batch fetch oracle data qua /cards/collection (75 cards/request)."""
     result = {}
-
     for i in range(0, len(names), BATCH_SIZE):
-        batch = names[i : i + BATCH_SIZE]
-        identifiers = [{"name": n} for n in batch]
-
+        batch = names[i:i + BATCH_SIZE]
         resp = requests.post(
             SCRYFALL_COLLECTION_URL,
-            json={"identifiers": identifiers},
+            json={"identifiers": [{"name": n} for n in batch]},
             headers={"Accept": "application/json"},
             timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
-
         for card in data.get("data", []):
             name = card.get("name", "")
-            if not name:
-                continue
-            result[name] = _normalize_card(card)
-
+            if name:
+                result[name] = _normalize_card(card)
         not_found = data.get("not_found", [])
         if not_found:
             print(f"  [!] Không tìm thấy trên Scryfall: {[n['name'] for n in not_found]}")
-
         time.sleep(SLEEP_BETWEEN_BATCHES)
+    return result
 
+
+def _batch_fetch_prices_only(names: list[str]) -> dict[str, dict]:
+    """
+    Fetch chỉ price data, trả về {oracle_name: {usd, usd_foil, eur}}.
+    FIX 2: Dùng cùng endpoint nhưng chỉ extract prices, không update oracle cache.
+    """
+    result = {}
+    for i in range(0, len(names), BATCH_SIZE):
+        batch = names[i:i + BATCH_SIZE]
+        resp = requests.post(
+            SCRYFALL_COLLECTION_URL,
+            json={"identifiers": [{"name": n} for n in batch]},
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for card in data.get("data", []):
+            prices = card.get("prices", {})
+            oracle_name = _extract_oracle_name(card)
+            result[oracle_name] = {
+                "usd":      prices.get("usd"),
+                "usd_foil": prices.get("usd_foil"),
+                "eur":      prices.get("eur"),
+            }
+        time.sleep(SLEEP_BETWEEN_BATCHES)
     return result
 
 
 def _normalize_card(card: dict) -> dict:
-    """Chuẩn hóa Scryfall card object thành schema nội bộ."""
+    """
+    Chuẩn hóa Scryfall response thành schema nội bộ.
+
+    FIX 1: Extract oracle_name riêng biệt với printing name.
+    FIX 2: Prices lưu tạm trong _prices key, caller tách ra upsert riêng.
+    """
     prices = card.get("prices", {})
     legalities = card.get("legalities", {})
+    oracle_name = _extract_oracle_name(card)
 
     return {
-        "name": card.get("name", ""),
-        "oracle_id": card.get("oracle_id", ""),
-        "mana_cost": card.get("mana_cost", ""),
-        "cmc": card.get("cmc", 0.0),
-        "type_line": card.get("type_line", ""),
-        "oracle_text": card.get("oracle_text", ""),
+        "name":           card.get("name", ""),
+        "oracle_name":    oracle_name,
+        "oracle_id":      card.get("oracle_id", ""),
+        "mana_cost":      card.get("mana_cost", ""),
+        "cmc":            card.get("cmc", 0.0),
+        "type_line":      card.get("type_line", ""),
+        "oracle_text":    card.get("oracle_text", ""),
         "color_identity": json.dumps(card.get("color_identity", [])),
-        "keywords": json.dumps(card.get("keywords", [])),
-        "legalities": json.dumps(legalities),
-        "prices": json.dumps({
-            "usd": prices.get("usd"),
+        "keywords":       json.dumps(card.get("keywords", [])),
+        "legalities":     json.dumps(legalities),
+        "scryfall_id":    card.get("id", ""),
+        # Price tách riêng — caller sẽ pop và upsert vào scryfall_prices
+        "_prices": {
+            "usd":      prices.get("usd"),
             "usd_foil": prices.get("usd_foil"),
-            "eur": prices.get("eur"),
-        }),
-        "scryfall_id": card.get("id", ""),
+            "eur":      prices.get("eur"),
+        },
     }
+
+
+def _extract_oracle_name(card: dict) -> str:
+    """
+    Lấy oracle_name (tên canonical) từ Scryfall card object.
+
+    FIX 1 — Reprint dedup rules:
+      - Single-face card: oracle_name = card["name"]
+      - Double-faced card (layout: transform/modal_dfc/...):
+          oracle_name = front face name chỉ
+          Ví dụ: "Delina, Wild Mage // Draconic Destiny" → "Delina, Wild Mage"
+      - Split card (layout: split/adventure):
+          oracle_name = full name giữ cả hai mặt vì là cùng physical card
+          Ví dụ: "Fire // Ice" → "Fire // Ice"
+
+    Dùng oracle_id để group reprints về cùng oracle_name.
+    """
+    layout = card.get("layout", "")
+    name = card.get("name", "")
+
+    # Double-faced: chỉ lấy front face
+    if layout in ("transform", "modal_dfc", "meld", "reversible_card"):
+        faces = card.get("card_faces", [])
+        if faces:
+            return faces[0].get("name", name)
+
+    # Split/adventure: giữ full name (Fire // Ice là 1 card)
+    return name
 
 
 def fetch_all_commanders() -> list[dict]:
     """
     Lấy tất cả commander hợp lệ từ Scryfall.
-
-    FIX Bug 4 — Partner commanders:
-      Scryfall trả về field all_parts[] cho double-faced cards và partner pairs.
-      Với partner: lưu is_partner=1 và partner_name để engine biết cần 2 commander.
-      EDHREC slug cho partner pair: partner1-partner2 (sorted alphabetically).
+    Detect partner ability từ keywords và oracle text.
     """
     print("Fetching danh sách commanders từ Scryfall...")
     commanders = []
-    url = SCRYFALL_BULK_COMMANDERS_URL
-    params = {
-        "q": "is:commander format:commander",
-        "order": "name",
-        "unique": "cards",
-    }
+    url = SCRYFALL_BULK_SEARCH_URL
+    params = {"q": "is:commander format:commander", "order": "name", "unique": "cards"}
 
     while url:
         resp = requests.get(url, params=params, timeout=30)
@@ -120,10 +214,6 @@ def fetch_all_commanders() -> list[dict]:
         data = resp.json()
 
         for card in data.get("data", []):
-            name = card["name"]
-            color_identity = card.get("color_identity", [])
-
-            # Detect partner commanders từ keywords
             keywords = card.get("keywords", [])
             oracle = card.get("oracle_text", "")
             is_partner = (
@@ -131,43 +221,38 @@ def fetch_all_commanders() -> list[dict]:
                 or "Partner with" in keywords
                 or "partner" in oracle.lower()
             )
-
             commanders.append({
-                "name": name,
-                "slug": _to_slug(name),
-                "color_identity": json.dumps(color_identity),
-                "is_partner": 1 if is_partner else 0,
-                "partner_name": None,  # sẽ set khi user chọn partner pair
+                "name":           card["name"],
+                "slug":           _to_slug(card["name"]),
+                "color_identity": json.dumps(card.get("color_identity", [])),
+                "is_partner":     1 if is_partner else 0,
+                "partner_name":   None,
             })
 
         url = data.get("next_page")
         params = {}
         time.sleep(SLEEP_BETWEEN_BATCHES)
 
-    print(f"  Tìm thấy {len(commanders)} commanders ({sum(1 for c in commanders if c['is_partner'])} có partner ability).")
+    partner_count = sum(1 for c in commanders if c["is_partner"])
+    print(f"  Tìm thấy {len(commanders)} commanders ({partner_count} có partner ability).")
     cache.upsert_commanders(commanders)
     return commanders
 
 
 def make_partner_slug(name1: str, name2: str) -> str:
     """
-    Tạo EDHREC slug cho partner pair.
-    EDHREC format: slug1-slug2 với tên được sort alphabetically.
+    Tạo EDHREC slug cho partner pair (sorted alphabetically).
     Ví dụ: Thrasios + Tymna → thrasios-triton-hero-tymna-the-weaver
     """
-    slug1, slug2 = _to_slug(name1), _to_slug(name2)
-    pair = sorted([slug1, slug2])
+    pair = sorted([_to_slug(name1), _to_slug(name2)])
     return f"{pair[0]}-{pair[1]}"
 
 
 def fetch_banned_list() -> list[str]:
-    """
-    Lấy banned list EDH Commander từ Scryfall.
-    Query: banned:commander
-    """
+    """Lấy banned list EDH từ Scryfall."""
     print("Fetching banned list từ Scryfall...")
     banned = []
-    url = SCRYFALL_BULK_COMMANDERS_URL
+    url = SCRYFALL_BULK_SEARCH_URL
     params = {"q": "banned:commander", "unique": "cards", "order": "name"}
 
     while url:
@@ -185,7 +270,6 @@ def fetch_banned_list() -> list[str]:
 
 
 def is_commander_legal(card_data: dict) -> bool:
-    """Kiểm tra card có legal trong Commander format không."""
     legalities = card_data.get("legalities", "{}")
     if isinstance(legalities, str):
         legalities = json.loads(legalities)
@@ -195,22 +279,12 @@ def is_commander_legal(card_data: dict) -> bool:
 def _to_slug(name: str) -> str:
     """
     Chuyển card name thành EDHREC slug format.
-
-    FIX Bug 4 edge cases:
-      - Dấu nháy đơn (Oko, Thief of Crowns → oko-thief-of-crowns)
-      - Dấu hai chấm (Atraxa, Praetors Voice → atraxa-praetors-voice)
-      - Ký tự đặc biệt (Urza's Saga → urzas-saga)
-      - Double-faced card: chỉ lấy phần trước // (Delina // đi theo front face)
-      - Dấu gạch ngang trailing/leading bị trim
+    Handle double-faced, smart quotes, và ký tự đặc biệt MTG.
     """
-    import re
-    # Double-faced: chỉ dùng front face
     if " // " in name:
         name = name.split(" // ")[0].strip()
     slug = name.lower()
-    # Xóa ký tự đặc biệt phổ biến trong MTG card names
-    slug = re.sub(r"[',\.!?:;]", "", slug)  # Remove common MTG punctuation
-    # Thay khoảng trắng và ký tự còn lại bằng dấu gạch ngang
+    slug = re.sub(r"[',\\.!?:;]", "", slug)
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = slug.strip("-")
     return slug

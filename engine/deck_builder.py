@@ -408,15 +408,22 @@ def _pick_basic_lands(
         })
     return result
 def _get_price(card_row: dict | None) -> float | None:
+    """
+    Lấy giá USD cho card.
+    FIX 2: Đọc từ scryfall_prices (TTL 7 ngày) thay vì từ scryfall_cards.
+    card_row["price_usd"] được inject bởi enrich_cards() nếu có;
+    fallback về cache.get_price_usd() nếu field chưa có.
+    """
     if not card_row:
         return None
-    prices_raw = card_row.get("prices", "{}")
-    if isinstance(prices_raw, str):
-        prices = json.loads(prices_raw)
-    else:
-        prices = prices_raw or {}
-    usd = prices.get("usd")
-    return float(usd) if usd else None
+    # enrich_cards() inject price_usd trực tiếp vào card_row
+    if "price_usd" in card_row and card_row["price_usd"] is not None:
+        return card_row["price_usd"]
+    # Fallback: đọc từ scryfall_prices table
+    oracle_name = card_row.get("oracle_name") or card_row.get("name")
+    if oracle_name:
+        return cache.get_price_usd(oracle_name)
+    return None
 
 
 _slots_cache = None
