@@ -1,0 +1,42 @@
+{
+  "_comment": "Slot targets cho một EDH deck 99 cards (không tính commander). Tổng = 99.",
+  "slots": {
+    "land":    { "target": 37, "min": 33, "max": 40 },
+    "ramp":    { "target": 10, "min": 8,  "max": 14 },
+    "draw":    { "target": 10, "min": 8,  "max": 14 },
+    "removal": { "target": 8,  "min": 6,  "max": 12 },
+    "wipe":    { "target": 3,  "min": 2,  "max": 5  },
+    "tutor":   { "target": 3,  "min": 0,  "max": 6  },
+    "synergy": { "target": 28, "min": 20, "max": 35 }
+  },
+
+  "_comment_keywords": "Keywords dùng để classify card vào slot khi EDHREC không tag",
+  "land_types": ["Land", "Basic Land"],
+  "ramp_keywords": [
+    "Search your library for a basic land",
+    "add {",
+    "Mana Artifact",
+    "Sol Ring", "Arcane Signet", "Commander's Sphere",
+    "Cultivate", "Kodama's Reach", "Rampant Growth",
+    "Explore", "Farseek", "Nature's Lore", "Three Visits"
+  ],
+  "draw_keywords": [
+    "draw a card", "draw two", "draw three", "draw cards",
+    "Divination", "Concentrate", "Harmonize",
+    "Rhystic Study", "Mystic Remora", "Phyrexian Arena"
+  ],
+  "removal_keywords": [
+    "Destroy target", "Exile target", "Return target",
+    "deals damage to target", "-X/-X"
+  ],
+  "wipe_keywords": [
+    "Destroy all", "Exile all", "deals damage to all",
+    "each creature gets -", "Wrath of God", "Damnation",
+    "Blasphemous Act", "Cyclonic Rift"
+  ],
+  "tutor_keywords": [
+    "Search your library for a card",
+    "Demonic Tutor", "Vampiric Tutor", "Imperial Seal",
+    "Mystical Tutor", "Enlightened Tutor", "Worldly Tutor"
+  ]
+}
