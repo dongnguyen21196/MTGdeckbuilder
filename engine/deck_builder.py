@@ -154,137 +154,141 @@ def build_deck(
             key=lambda c: (not c["is_owned"], -c["synergy"])
         )
 
-    # 7. Greedy fill theo slot targets
+    # 7. Tier-based Pool Picking
     #
-    # FIX Bug 3 — Basic land count logic:
-    #   Land slot (target=37) gom 2 loai:
-    #     a) Non-basic lands: singleton, uu tien fetch tu EDHREC pool truoc
-    #     b) Basic lands: fill phan con lai bang Plains/Island/...
-    #        tuong ung voi color identity cua commander
-    #   Dam bao: tong land = dung 37, tong deck = dung 99
+    # Kiến trúc mới thay thế slot-by-slot greedy fill:
+    #
+    # Thay vì "fill ramp trước, draw sau", gom tất cả non-land cards vào
+    # một pool duy nhất. Mỗi lượt pick, chọn card có pick_score cao nhất.
+    #
+    # pick_score = dynamic_score × owned_bonus + slot_hunger
+    #
+    # slot_hunger: bonus thêm cho card của slot còn thiếu so với target.
+    #   Slot càng "đói" (thiếu nhiều so với target) → hunger càng cao
+    #   → card của slot đó được ưu tiên hơn. Khi slot đủ target,
+    #   hunger = 0 nhưng card vẫn có thể được chọn nếu score đủ cao
+    #   (cạnh tranh với synergy pool — tức là soft fallback tự nhiên).
+    #
+    # Lợi thế so với slot-by-slot:
+    #   - Không bao giờ bỏ card mạnh vì "slot đầy"
+    #   - Card yếu không được ưu tiên chỉ vì slot của nó chưa đủ
+    #   - Curve penalty và chain buff được apply đồng nhất cho tất cả cards
+    #   - Soft fallback là hệ quả tự nhiên, không cần code riêng
+    #
+    # Land vẫn xử lý riêng (non-basic EDHREC pool + basic pip-weighted fill)
+    # vì land có logic đặc biệt không phù hợp với pool scoring chung.
+
     slot_targets = {s: d["target"] for s, d in _load_slots_raw().items()}
     selected: list[dict] = []
-    missing: list[dict] = []
+    missing:  list[dict] = []
     used_names: set[str] = set()
 
-    LAND_TARGET = slot_targets.get("land", 37)
+    LAND_TARGET    = slot_targets.get("land", 37)
+    NON_LAND_TOTAL = 99 - LAND_TARGET  # = 62
 
-    # Ref containers để capture pip analysis từ trong vòng lặp
+    # Ref containers để capture pip analysis
     _pip_analysis_ref: list = [None]
-    _basic_dist_ref: list = [{}]
+    _basic_dist_ref:   list = [{}]
 
-    # Soft fallback pool: cards bị "rớt" khỏi slot đã đầy
-    # Sẽ được xét lại ở bước fill synergy cuối, sorted by dynamic score
-    synergy_fallback_pool: list[dict] = []
-
-    for slot, target in slot_targets.items():
-        pool = slot_pools.get(slot, [])
-        count = 0
-
-        if slot == "land":
-            # Buoc a: Non-basic lands truoc (singleton, tu EDHREC pool)
-            non_basics = [c for c in pool if not bl.is_basic_land(c["name"])]
-            for card in non_basics:
-                if count >= LAND_TARGET:
-                    break
-                if card["name"] in used_names:
-                    continue
-                used_names.add(card["name"])
-                selected.append(card)
-                if not card["is_owned"]:
-                    missing.append(card)
-                count += 1
-
-            # Buoc b: Basic lands de lap du target — pip-weighted distribution
-            basic_remaining = LAND_TARGET - count
-            if basic_remaining > 0:
-                # Pip analysis: đếm {W}/{U}/{B}/{R}/{G} từ tất cả non-land cards
-                all_non_land_names = [
-                    c["name"] for c in selected if c["slot"] != "land"
-                ] + [
-                    name for name in used_names
-                    if not bl.is_basic_land(name)
-                    and scryfall_data.get(name, {}).get("type_line", "")
-                    and "Land" not in scryfall_data[name]["type_line"]
-                ]
-                pip = analyze_pips(all_non_land_names, scryfall_data, commander_colors)
-                distribution = calculate_basic_land_distribution(
-                    pip, basic_remaining, commander_colors, min_per_color=1
-                )
-                basic_cards = build_basic_land_list(distribution, collection_names)
-                selected.extend(basic_cards)
-                count += len(basic_cards)
-                # Lưu lại để output
-                _pip_analysis_ref[0] = pip
-                _basic_dist_ref[0] = distribution
+    # ── Step 7a: Land slot (xử lý riêng, không vào pool) ──────────────────
+    land_pool = slot_pools.get("land", [])
+    land_count = 0
+    non_basics = [c for c in land_pool if not bl.is_basic_land(c["name"])]
+    for card in non_basics:
+        if land_count >= LAND_TARGET:
+            break
+        if card["name"] in used_names:
             continue
+        used_names.add(card["name"])
+        selected.append(card)
+        if not card["is_owned"]:
+            missing.append(card)
+        land_count += 1
 
-        # Slots khác: dynamic scoring (curve penalty + chain buff)
-        # Sort pool theo dynamic score, owned first
-        dynamic_pool = sorted(
-            [c for c in pool
-             if c["name"] not in used_names and not bl.is_basic_land(c["name"])],
-            key=lambda c: (not c["is_owned"], -dynamic_scorer.adjust_score(c))
-        )
-        for card in dynamic_pool:
-            if count >= target:
-                # Slot đã đủ target — SOFT FALLBACK:
-                # Thay vì bỏ card mạnh còn lại, đẩy vào synergy_fallback_pool
-                # để xét sau. Chỉ fallback card có synergy đáng kể (> ngưỡng).
-                if card["name"] not in used_names and not bl.is_basic_land(card["name"]):
-                    synergy_fallback_pool.append(card)
-                continue
+    # ── Step 7b: Build unified non-land pool ──────────────────────────────
+    # Gom tất cả non-land cards từ mọi slot vào 1 pool duy nhất
+    unified_pool: list[dict] = []
+    for slot, cards in slot_pools.items():
+        if slot == "land":
+            continue
+        for card in cards:
+            if card["name"] not in used_names and not bl.is_basic_land(card["name"]):
+                unified_pool.append(card)
+
+    # Dedup: mỗi card chỉ xuất hiện 1 lần trong pool
+    seen_in_pool: set[str] = set()
+    deduped_pool: list[dict] = []
+    for card in unified_pool:
+        if card["name"] not in seen_in_pool:
+            seen_in_pool.add(card["name"])
+            deduped_pool.append(card)
+
+    # ── Step 7c: Tier-based picking — 62 picks ────────────────────────────
+    # Track slot counts để tính slot_hunger real-time
+    slot_counts: dict[str, int] = {s: 0 for s in slot_targets if s != "land"}
+
+    # Hunger scaling: hunger giảm tuyến tính từ HUNGER_MAX → 0 khi slot đầy
+    HUNGER_MAX    = 0.15   # bonus tối đa khi slot hoàn toàn trống
+    OWNED_BONUS   = 0.05   # nhỏ — owned được ưu tiên nhưng không áp đảo score
+
+    def slot_hunger(slot: str) -> float:
+        """Bonus score cho card của slot còn thiếu. = 0 khi slot >= target."""
+        target = slot_targets.get(slot, 0)
+        if target <= 0:
+            return 0.0
+        current = slot_counts.get(slot, 0)
+        deficit_ratio = max(0.0, (target - current) / target)
+        return HUNGER_MAX * deficit_ratio
+
+    picks_done = 0
+    while picks_done < NON_LAND_TOTAL and deduped_pool:
+        # Score tất cả cards trong pool với state hiện tại
+        # O(n) per pick, n = pool size (~200-300), 62 picks → ~15,000 ops
+        best_score = -1.0
+        best_idx   = -1
+
+        for i, card in enumerate(deduped_pool):
             if card["name"] in used_names:
                 continue
-            used_names.add(card["name"])
-            selected.append(card)
-            if not card["is_owned"]:
-                missing.append(card)
-            dynamic_scorer.register_pick(card)
-            count += 1
 
-    # 8. Fill còn thiếu vào slot synergy — merge EDHREC pool + soft fallback
-    #
-    # Soft Fallback: cards bị rớt khỏi slot đầy (vd: ramp slot 10/10 nhưng
-    # còn lá ramp synergy cao) được đưa vào synergy_fallback_pool ở bước 7.
-    # Giờ merge chúng với EDHREC synergy pool, re-sort theo dynamic score,
-    # để đảm bảo lá mạnh nhất luôn được chọn — không bị lãng phí vì slot cứng.
-    remaining_slots = 99 - len(selected)
-    if remaining_slots > 0:
-        synergy_base = [
-            c for c in slot_pools.get("synergy", [])
-            if c["name"] not in used_names and not bl.is_basic_land(c["name"])
-        ]
-        # Fallback cards: đổi slot label thành "synergy" để không confuse output
-        fallback_relabeled = [
-            {**c, "slot": "synergy", "_original_slot": c["slot"]}
-            for c in synergy_fallback_pool
-            if c["name"] not in used_names
-        ]
+            dyn  = dynamic_scorer.adjust_score(card)
+            own  = OWNED_BONUS if card["is_owned"] else 0.0
+            hung = slot_hunger(card["slot"])
+            score = dyn + own + hung
 
-        # Merge và sort theo dynamic score — fallback cards cạnh tranh ngang hàng
-        merged_synergy = sorted(
-            synergy_base + fallback_relabeled,
-            key=lambda c: (not c["is_owned"], -dynamic_scorer.adjust_score(c))
+            if score > best_score:
+                best_score = score
+                best_idx   = i
+
+        if best_idx == -1:
+            break  # pool cạn
+
+        # Pick card tốt nhất
+        card = deduped_pool.pop(best_idx)
+        used_names.add(card["name"])
+        selected.append(card)
+        if not card["is_owned"]:
+            missing.append(card)
+
+        # Cập nhật trackers
+        slot_counts[card["slot"]] = slot_counts.get(card["slot"], 0) + 1
+        dynamic_scorer.register_pick(card)
+        picks_done += 1
+
+    # ── Step 7d: Basic land fill (pip-weighted) ────────────────────────────
+    basic_remaining = LAND_TARGET - land_count
+    if basic_remaining > 0:
+        all_non_land_names = [
+            c["name"] for c in selected if c["slot"] != "land"
+        ]
+        pip = analyze_pips(all_non_land_names, scryfall_data, commander_colors)
+        distribution = calculate_basic_land_distribution(
+            pip, basic_remaining, commander_colors, min_per_color=1
         )
-
-        fallback_picked = 0
-        for card in merged_synergy:
-            if remaining_slots <= 0:
-                break
-            if card["name"] in used_names:
-                continue
-            used_names.add(card["name"])
-            selected.append(card)
-            if not card["is_owned"]:
-                missing.append(card)
-            dynamic_scorer.register_pick(card)
-            remaining_slots -= 1
-            if "_original_slot" in card:
-                fallback_picked += 1
-
-        if fallback_picked:
-            print(f"  Soft fallback: {fallback_picked} cards từ slot đầy → synergy")
+        basic_cards = build_basic_land_list(distribution, collection_names)
+        selected.extend(basic_cards)
+        _pip_analysis_ref[0] = pip
+        _basic_dist_ref[0]   = distribution
 
     # 9. Score deck
     owned_count = sum(1 for c in selected if c["is_owned"])
