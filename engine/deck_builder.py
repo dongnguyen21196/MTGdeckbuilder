@@ -173,6 +173,10 @@ def build_deck(
     _pip_analysis_ref: list = [None]
     _basic_dist_ref: list = [{}]
 
+    # Soft fallback pool: cards bị "rớt" khỏi slot đã đầy
+    # Sẽ được xét lại ở bước fill synergy cuối, sorted by dynamic score
+    synergy_fallback_pool: list[dict] = []
+
     for slot, target in slot_targets.items():
         pool = slot_pools.get(slot, [])
         count = 0
@@ -215,37 +219,57 @@ def build_deck(
                 _basic_dist_ref[0] = distribution
             continue
 
-        # Slots khac: dùng dynamic scoring (curve penalty + chain buff)
-        # Re-sort pool theo dynamic score trước khi pick
-        # Lazy re-sort: chỉ sort khi có chain buff đã thay đổi
+        # Slots khác: dynamic scoring (curve penalty + chain buff)
+        # Sort pool theo dynamic score, owned first
         dynamic_pool = sorted(
-            [c for c in pool if c["name"] not in used_names and not bl.is_basic_land(c["name"])],
+            [c for c in pool
+             if c["name"] not in used_names and not bl.is_basic_land(c["name"])],
             key=lambda c: (not c["is_owned"], -dynamic_scorer.adjust_score(c))
         )
         for card in dynamic_pool:
             if count >= target:
-                break
+                # Slot đã đủ target — SOFT FALLBACK:
+                # Thay vì bỏ card mạnh còn lại, đẩy vào synergy_fallback_pool
+                # để xét sau. Chỉ fallback card có synergy đáng kể (> ngưỡng).
+                if card["name"] not in used_names and not bl.is_basic_land(card["name"]):
+                    synergy_fallback_pool.append(card)
+                continue
             if card["name"] in used_names:
                 continue
             used_names.add(card["name"])
             selected.append(card)
             if not card["is_owned"]:
                 missing.append(card)
-            # Cập nhật state sau mỗi pick
             dynamic_scorer.register_pick(card)
             count += 1
 
-    # 8. Fill thieu vao slot synergy neu < 99 — dùng dynamic scoring
+    # 8. Fill còn thiếu vào slot synergy — merge EDHREC pool + soft fallback
+    #
+    # Soft Fallback: cards bị rớt khỏi slot đầy (vd: ramp slot 10/10 nhưng
+    # còn lá ramp synergy cao) được đưa vào synergy_fallback_pool ở bước 7.
+    # Giờ merge chúng với EDHREC synergy pool, re-sort theo dynamic score,
+    # để đảm bảo lá mạnh nhất luôn được chọn — không bị lãng phí vì slot cứng.
     remaining_slots = 99 - len(selected)
     if remaining_slots > 0:
-        synergy_pool = slot_pools.get("synergy", [])
-        # Re-sort theo dynamic score để chain buff được áp dụng
-        dynamic_synergy = sorted(
-            [c for c in synergy_pool
-             if c["name"] not in used_names and not bl.is_basic_land(c["name"])],
+        synergy_base = [
+            c for c in slot_pools.get("synergy", [])
+            if c["name"] not in used_names and not bl.is_basic_land(c["name"])
+        ]
+        # Fallback cards: đổi slot label thành "synergy" để không confuse output
+        fallback_relabeled = [
+            {**c, "slot": "synergy", "_original_slot": c["slot"]}
+            for c in synergy_fallback_pool
+            if c["name"] not in used_names
+        ]
+
+        # Merge và sort theo dynamic score — fallback cards cạnh tranh ngang hàng
+        merged_synergy = sorted(
+            synergy_base + fallback_relabeled,
             key=lambda c: (not c["is_owned"], -dynamic_scorer.adjust_score(c))
         )
-        for card in dynamic_synergy:
+
+        fallback_picked = 0
+        for card in merged_synergy:
             if remaining_slots <= 0:
                 break
             if card["name"] in used_names:
@@ -256,6 +280,11 @@ def build_deck(
                 missing.append(card)
             dynamic_scorer.register_pick(card)
             remaining_slots -= 1
+            if "_original_slot" in card:
+                fallback_picked += 1
+
+        if fallback_picked:
+            print(f"  Soft fallback: {fallback_picked} cards từ slot đầy → synergy")
 
     # 9. Score deck
     owned_count = sum(1 for c in selected if c["is_owned"])
