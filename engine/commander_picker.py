@@ -232,9 +232,13 @@ def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
     edhrec_num_decks = edhrec_cards[0]["potential_decks"] if edhrec_cards else 0
 
     # Collection overlap
+    # FIX: chia cho len(edhrec_cards) thực tế (~294), không phải 99.
+    # EDHREC trả về ~294 cards/commander. Chia cho 99 inflate score 3×.
+    # Ý nghĩa sau fix: "bao nhiêu % pool EDHREC của commander này
+    # nằm trong collection của user" — phản ánh đúng mức độ phù hợp.
     owned_and_synergy = edhrec_card_names & collection_names
     overlap_count = len(owned_and_synergy)
-    overlap_pct = overlap_count / 99 if edhrec_cards else 0.0
+    overlap_pct = overlap_count / max(len(edhrec_cards), 1) if edhrec_cards else 0.0
 
     top_owned = sorted(
         [c for c in edhrec_cards if c["card_name"] in collection_names],

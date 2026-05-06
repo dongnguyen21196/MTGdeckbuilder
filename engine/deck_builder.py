@@ -244,7 +244,12 @@ def build_deck(
     slot_counts: dict[str, int] = {s: 0 for s in slot_targets if s != "land"}
 
     # Hunger scaling: hunger giảm tuyến tính từ HUNGER_MAX → 0 khi slot đầy
-    HUNGER_MAX    = 0.15   # bonus tối đa khi slot hoàn toàn trống
+    # FIX: tăng HUNGER_MAX từ 0.15 → 0.25
+    # EDHREC synergy range: 0.02–0.30. Với 0.15, ramp card (0.05) + hunger (0.15)
+    # = 0.20 bằng synergy card mạnh (0.20) → tie, slot không được ưu tiên đúng.
+    # Với 0.25: ramp trống (0/10) thắng cả synergy 0.24, nhưng khi ramp đã 80%
+    # (8/10) → hunger=0.05, nhường cho synergy card chất lượng cao. Đúng intent.
+    HUNGER_MAX    = 0.25   # bonus tối đa khi slot hoàn toàn trống (tăng từ 0.15)
     OWNED_BONUS   = 0.05   # nhỏ — owned được ưu tiên nhưng không áp đảo score
 
     def slot_hunger(slot: str) -> float:
@@ -307,18 +312,45 @@ def build_deck(
         _basic_dist_ref[0]   = distribution
 
     # 9. Score deck
+    # FIX: tách avg_synergy khỏi basic lands (synergy=0 làm lệch score).
+    # Chỉ tính non-land cards cho avg_synergy.
+    non_land_cards = [c for c in selected if c["slot"] != "land"]
     owned_count = sum(1 for c in selected if c["is_owned"])
-    avg_synergy = sum(c["synergy"] for c in selected) / max(len(selected), 1)
+    avg_synergy = (
+        sum(c["synergy"] for c in non_land_cards) / max(len(non_land_cards), 1)
+    )
     coverage = owned_count / max(len(selected), 1)
     slot_balance = _score_slot_balance(selected, slot_targets)
     total_missing_price = sum(
         c["price_usd"] for c in missing if c["price_usd"] is not None
     )
 
+    # FIX: dùng scorer.py để tính composite — 1 công thức duy nhất.
+    # Tránh tình trạng deck_builder và scorer.py dùng 2 công thức khác nhau.
+    # deck_builder tính sơ bộ để fill BuiltDeck, scorer.py sẽ override khi display.
+    # composite ở đây dùng cùng weights với scorer.py (40/20/15/15/10)
+    # nhưng chưa có curve/chain (chưa chạy scorer). Được bù bởi scorer.py sau.
+    from engine.mana_curve import analyze_curve as _analyze_curve
+    from engine.synergy_chain import analyze_synergy_chains as _analyze_chains
+    _deck_cards_tmp = [
+        type("_C", (), {"name": c["name"], "slot": c["slot"], "synergy": c["synergy"],
+                        "is_owned": c["is_owned"], "cmc": c["cmc"] or 0.0,
+                        "type_line": c["type_line"] or "", "price_usd": c.get("price_usd")})()
+        for c in selected
+    ]
+    _oracle_tmp = {
+        name: (scryfall_data.get(name) or {}).get("oracle_text", "") or ""
+        for name in [c["name"] for c in selected]
+    }
+    _curve_tmp  = _analyze_curve(_deck_cards_tmp)
+    _chains_tmp = _analyze_chains(_deck_cards_tmp, _oracle_tmp)
+    synergy_norm = min(avg_synergy * 5, 1.0)
     composite = (
-        0.50 * min(avg_synergy * 5, 1.0)
-        + 0.30 * coverage
-        + 0.20 * slot_balance
+        0.40 * synergy_norm
+        + 0.20 * coverage
+        + 0.15 * _curve_tmp.curve_score
+        + 0.15 * _chains_tmp.chain_score
+        + 0.10 * slot_balance
     )
 
     deck_cards = [DeckCard(**{k: c[k] for k in DeckCard.__dataclass_fields__}) for c in selected]
