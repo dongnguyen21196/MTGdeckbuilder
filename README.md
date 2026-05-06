@@ -70,7 +70,7 @@ python cli.py build --output ranked --top 5
 ### Import collection
 
 ```bash
-# From Archidekt CSV export  (Archidekt → Collection → Export)
+# From Archidekt CSV export  (Archidekt -> Collection -> Export)
 python cli.py import --csv my_collection.csv
 
 # From Archidekt API (requires ARCHIDEKT_API_KEY in .env)
@@ -166,7 +166,7 @@ Each deck receives a composite score from 5 components:
 | Synergy chains | 15% | Meaningful card pairs + theme density (aristocrats, ETB loops, wheels…) |
 | Slot balance | 10% | How well slots match the archetype's ideal distribution |
 
-**Grade scale:** A ≥ 80% · B ≥ 65% · C ≥ 50% · D < 50%
+**Grade scale:** A >= 80% · B >= 65% · C >= 50% · D < 50%
 
 ### Mana pip analysis
 
@@ -292,7 +292,7 @@ python cli.py build --output ranked --top 5
 ### Import collection
 
 ```bash
-# Từ CSV export của Archidekt  (Archidekt → Collection → Export)
+# Từ CSV export của Archidekt  (Archidekt -> Collection -> Export)
 python cli.py import --csv my_collection.csv
 
 # Từ Archidekt API (cần ARCHIDEKT_API_KEY trong .env)
@@ -378,7 +378,7 @@ MTGdeckbuilder/
 
 ## Hệ thống chấm điểm
 
-M��i deck được chấm điểm tổng hợp từ 5 thành phần:
+Mỗi deck được chấm điểm tổng hợp từ 5 thành phần:
 
 | Thành phần | Trọng số | Mô tả |
 |---|---|---|
@@ -388,7 +388,7 @@ M��i deck được chấm điểm tổng hợp từ 5 thành phần:
 | Synergy chains | 15% | Cặp card có tương tác + mật độ theme |
 | Slot balance | 10% | Tỉ lệ slot có khớp archetype |
 
-**Thang điểm:** A ≥ 80% · B ≥ 65% · C ≥ 50% · D < 50%
+**Thang điểm:** A >= 80% · B >= 65% · C >= 50% · D < 50%
 
 ### Mana pip analysis
 
