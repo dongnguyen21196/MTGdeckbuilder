@@ -76,6 +76,18 @@ def _print_deck_detail(rank: int, deck: BuiltDeck, sc: DeckScoreBreakdown):
         print(f"       Curve: avg={c.avg_cmc:.1f}  [{dist}]")
         print(f"       → {c.verdict}  (fit: {c.archetype_fit})")
 
+    # Mana pip analysis — basic land distribution
+    if deck.pip_analysis and deck.basic_distribution:
+        pip = deck.pip_analysis
+        dist_parts = []
+        from engine.mana_pip import COLOR_TO_BASIC
+        for color in pip.present_colors:
+            count = deck.basic_distribution.get(color, 0)
+            basic = COLOR_TO_BASIC.get(color, color)
+            pct = pip.ratios.get(color, 0)
+            dist_parts.append(f"{basic}×{count}({pct:.0%}pip)")
+        print(f"       Mana base: {pip.distribution_summary}  →  {', '.join(dist_parts)}")
+
     # Synergy chains
     if sc.chains:
         ch = sc.chains

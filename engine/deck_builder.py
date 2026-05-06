@@ -21,6 +21,10 @@ from pathlib import Path
 from enrichers import scryfall, edhrec
 from filters import banned_list as bl
 from db import cache
+from engine.mana_pip import (
+    analyze_pips, calculate_basic_land_distribution,
+    build_basic_land_list, format_pip_report,
+)
 
 SLOTS_FILE = Path(__file__).parent.parent / "data" / "slots.json"
 
@@ -47,6 +51,8 @@ class BuiltDeck:
     slot_balance_score: float = 0.0
     composite_score: float = 0.0
     total_price_missing: float = 0.0
+    pip_analysis: object = None      # PipAnalysis — pip distribution của deck
+    basic_distribution: dict = field(default_factory=dict)  # {color: count} basic lands
 
 
 def build_deck(
@@ -149,6 +155,10 @@ def build_deck(
 
     LAND_TARGET = slot_targets.get("land", 37)
 
+    # Ref containers để capture pip analysis từ trong vòng lặp
+    _pip_analysis_ref: list = [None]
+    _basic_dist_ref: list = [{}]
+
     for slot, target in slot_targets.items():
         pool = slot_pools.get(slot, [])
         count = 0
@@ -167,14 +177,28 @@ def build_deck(
                     missing.append(card)
                 count += 1
 
-            # Buoc b: Basic lands de lap du target
+            # Buoc b: Basic lands de lap du target — pip-weighted distribution
             basic_remaining = LAND_TARGET - count
             if basic_remaining > 0:
-                basic_cards = _pick_basic_lands(
-                    commander_colors, basic_remaining, collection_names
+                # Pip analysis: đếm {W}/{U}/{B}/{R}/{G} từ tất cả non-land cards
+                all_non_land_names = [
+                    c["name"] for c in selected if c["slot"] != "land"
+                ] + [
+                    name for name in used_names
+                    if not bl.is_basic_land(name)
+                    and scryfall_data.get(name, {}).get("type_line", "")
+                    and "Land" not in scryfall_data[name]["type_line"]
+                ]
+                pip = analyze_pips(all_non_land_names, scryfall_data, commander_colors)
+                distribution = calculate_basic_land_distribution(
+                    pip, basic_remaining, commander_colors, min_per_color=1
                 )
+                basic_cards = build_basic_land_list(distribution, collection_names)
                 selected.extend(basic_cards)
                 count += len(basic_cards)
+                # Lưu lại để output
+                _pip_analysis_ref[0] = pip
+                _basic_dist_ref[0] = distribution
             continue
 
         # Slots khac: xu ly binh thuong (non-basic singleton)
@@ -236,6 +260,8 @@ def build_deck(
         slot_balance_score=slot_balance,
         composite_score=composite,
         total_price_missing=total_missing_price,
+        pip_analysis=_pip_analysis_ref[0],
+        basic_distribution=_basic_dist_ref[0],
     )
 
 
