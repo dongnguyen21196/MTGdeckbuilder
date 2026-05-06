@@ -26,6 +26,7 @@ from engine.mana_pip import (
     build_basic_land_list, format_pip_report,
 )
 from engine.dynamic_scoring import DynamicScorer
+from engine.slot_config import get_slot_targets, describe_adjustments
 
 SLOTS_FILE = Path(__file__).parent.parent / "data" / "slots.json"
 
@@ -178,7 +179,22 @@ def build_deck(
     # Land vẫn xử lý riêng (non-basic EDHREC pool + basic pip-weighted fill)
     # vì land có logic đặc biệt không phù hợp với pool scoring chung.
 
-    slot_targets = {s: d["target"] for s, d in _load_slots_raw().items()}
+    # V2 + V7: Dynamic slot targets theo archetype + commander CMC
+    commander_cmc = cmd_data.get("cmc", 3.0) or 3.0
+    partner_cmc   = 0.0
+    if partner_name:
+        partner_data_for_cmc = cmd_data_rows.get(partner_name, {})
+        partner_cmc = partner_data_for_cmc.get("cmc", 0.0) or 0.0
+
+    slot_targets = get_slot_targets(
+        archetype=archetype,
+        commander_cmc=commander_cmc,
+        partner_cmc=partner_cmc,
+    )
+    adj_desc = describe_adjustments(archetype, commander_cmc, slot_targets)
+    if adj_desc and "no adjustments" not in adj_desc:
+        print(f"  Slot adjustments: {adj_desc}")
+
     selected: list[dict] = []
     missing:  list[dict] = []
     used_names: set[str] = set()

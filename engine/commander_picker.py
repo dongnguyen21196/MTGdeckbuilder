@@ -99,6 +99,51 @@ _COLOR_MIN_CARDS   = 20    # phải có ít nhất 20 card màu đó
 _COLOR_MIN_RATIO   = 0.03  # hoặc ít nhất 3% tổng non-land cards
 
 
+def _get_commander_cmc(commander_name: str) -> float:
+    """Lấy CMC của commander từ Scryfall cache. Default 3.0 nếu không có."""
+    row = cache.get_scryfall_card(commander_name)
+    if row and row["cmc"] is not None:
+        return float(row["cmc"])
+    return 3.0
+
+
+def _calc_redundancy_score(
+    edhrec_cards: list,
+    collection_names: set[str],
+) -> float:
+    """
+    Đo mức độ collection cover các slot thiết yếu cho commander.
+
+    Score = trung bình coverage của 3 slot: ramp, draw, removal.
+    Mỗi slot: coverage = min(owned_count / min_needed, 1.0)
+
+    Min needed theo slot (EDH thực tế):
+      ramp: 8 cards   draw: 8 cards   removal: 6 cards
+
+    Lý do dùng redundancy score thay popularity (V3 FIX):
+      Popularity đo "commander này nổi tiếng" — không liên quan collection.
+      Redundancy đo "collection của bạn có đủ bài thiết yếu cho commander này".
+      Commander nổi tiếng nhưng collection thiếu ramp → điểm thấp hơn đúng.
+    """
+    # Phân loại EDHREC cards vào slot
+    slot_owned: dict[str, int] = {"ramp": 0, "draw": 0, "removal": 0}
+    slot_min_needed = {"ramp": 8, "draw": 8, "removal": 6}
+
+    for c in edhrec_cards:
+        if c["card_name"] not in collection_names:
+            continue
+        slot = c.get("slot_tag", "") or ""
+        if slot in slot_owned:
+            slot_owned[slot] += 1
+
+    scores = []
+    for slot, min_needed in slot_min_needed.items():
+        owned = slot_owned.get(slot, 0)
+        scores.append(min(owned / min_needed, 1.0))
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
 def _infer_collection_colors(collection_names: set[str]) -> set[str]:
     """
     Suy ra tập màu chủ đạo của collection từ Scryfall cache.
@@ -197,25 +242,41 @@ def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
         reverse=True,
     )[:5]
 
-    # Composite score:
-    #   40% collection overlap %  (cao = ít phải mua)
-    #   30% avg synergy của owned cards
-    #   20% EDHREC popularity (log-normalized)
-    #   10% bonus nếu commander đang sở hữu
+    # Composite score — V3 FIX:
+    #   Bỏ 20% EDHREC popularity (không liên quan collection của user).
+    #   Thay bằng CMC penalty + redundancy score.
+    #
+    #   50% collection overlap %   (bao nhiêu % deck có thể fill từ collection)
+    #   25% avg synergy owned      (chất lượng synergy của phần owned)
+    #   15% redundancy score       (collection có đủ bài cho mọi slot không)
+    #   10% CMC accessibility      (commander có dễ cast không — CMC thấp = tốt hơn)
+    #   +bonus nếu commander đang sở hữu (không phải % vì sum phải = 1.0)
+
     avg_synergy = (
         sum(c["synergy"] for c in edhrec_cards if c["card_name"] in collection_names)
         / max(overlap_count, 1)
     )
 
-    popularity_score = math.log10(max(edhrec_num_decks, 1)) / 6  # normalize to ~0-1
+    # CMC penalty: CMC thấp → dễ cast → điểm cao hơn
+    # Scale: CMC=1→1.0, CMC=4→0.7, CMC=7→0.4, CMC=10→0.1
+    cmd_cmc = _get_commander_cmc(cmd["name"])
+    cmc_score = max(0.1, 1.0 - (cmd_cmc - 1) * 0.10)
+
+    # Redundancy score: đo mức độ collection cover các slot thiết yếu
+    # (ramp, draw, removal) cho commander này
+    redundancy_score = _calc_redundancy_score(edhrec_cards, collection_names)
+
     owned_bonus = 0.10 if is_owned else 0.0
 
     composite = (
-        0.40 * overlap_pct
-        + 0.30 * min(avg_synergy * 5, 1.0)
-        + 0.20 * popularity_score
+        0.50 * overlap_pct
+        + 0.25 * min(avg_synergy * 4, 1.0)  # normalize: synergy avg ~0.10 = 0.4
+        + 0.15 * redundancy_score
+        + 0.10 * cmc_score
         + owned_bonus
     )
+    # Cap tại 1.0 kể cả owned_bonus
+    composite = min(composite, 1.0)
 
     return CommanderScore(
         name=cmd["name"],
