@@ -93,23 +93,71 @@ def pick_commanders(
     return scored[:top_n]
 
 
+# Ngưỡng tối thiểu để coi 1 màu là "có trong collection"
+# Mục đích: loại bỏ màu "rác" từ 1-2 card lẻ làm loãng pre-filter
+_COLOR_MIN_CARDS   = 20    # phải có ít nhất 20 card màu đó
+_COLOR_MIN_RATIO   = 0.03  # hoặc ít nhất 3% tổng non-land cards
+
+
 def _infer_collection_colors(collection_names: set[str]) -> set[str]:
     """
-    Suy ra tập màu của collection từ Scryfall cache.
-    Trả về union của color_identity tất cả card trong collection.
-    Chỉ tính card đã có trong scryfall cache (không fetch mới).
+    Suy ra tập màu chủ đạo của collection từ Scryfall cache.
+
+    FIX điểm 3 — Color threshold:
+    Không lấy union toàn bộ màu (dễ bị nhiễu bởi 1-2 card lẻ).
+    Thay vào đó đếm số card theo từng màu, chỉ coi màu là hợp lệ
+    khi đạt ĐỒNG THỜI ít nhất một trong hai ngưỡng:
+      - Absolute: >= _COLOR_MIN_CARDS card có màu đó trong CI
+      - Relative: >= _COLOR_MIN_RATIO % tổng non-land cards
+
+    Ví dụ: collection 3.000 card chủ yếu WU với 2 card R lẻ:
+      W: 1.200 card → 40% → valid
+      U: 1.400 card → 47% → valid
+      R: 2 card   →  0.07% → LOẠI (< 3% và < 20 cards)
+
+    Edge cases:
+      - Collection trống / chưa enrich: trả về {} (không filter)
+      - Collection toàn colorless: trả về {} (không filter)
+      - Collection < 50 cards: hạ ngưỡng xuống 2 cards tuyệt đối
     """
-    colors: set[str] = set()
+    if not collection_names:
+        return set()
+
+    color_counts: dict[str, int] = {c: 0 for c in "WUBRG"}
+    total_non_land = 0
+
     with cache.get_conn() as conn:
         placeholders = ",".join("?" * len(collection_names))
         rows = conn.execute(
-            f"SELECT color_identity FROM scryfall_cards WHERE name IN ({placeholders})",
+            f"""SELECT color_identity, type_line
+                FROM scryfall_cards
+                WHERE name IN ({placeholders})""",
             list(collection_names),
         ).fetchall()
+
     for row in rows:
+        type_line = row["type_line"] or ""
+        if "Land" in type_line:
+            continue  # bỏ qua lands khi đếm
+        total_non_land += 1
         ci = json.loads(row["color_identity"] or "[]")
-        colors.update(ci)
-    return colors
+        for color in ci:
+            if color in color_counts:
+                color_counts[color] += 1
+
+    if total_non_land == 0:
+        return set()
+
+    # Điều chỉnh ngưỡng absolute cho collection nhỏ
+    min_cards = max(2, min(_COLOR_MIN_CARDS, total_non_land // 20))
+
+    valid_colors: set[str] = set()
+    for color, count in color_counts.items():
+        ratio = count / total_non_land
+        if count >= min_cards or ratio >= _COLOR_MIN_RATIO:
+            valid_colors.add(color)
+
+    return valid_colors
 
 
 def _filter_by_color_identity(

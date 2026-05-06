@@ -25,6 +25,7 @@ from engine.mana_pip import (
     analyze_pips, calculate_basic_land_distribution,
     build_basic_land_list, format_pip_report,
 )
+from engine.dynamic_scoring import DynamicScorer
 
 SLOTS_FILE = Path(__file__).parent.parent / "data" / "slots.json"
 
@@ -53,12 +54,15 @@ class BuiltDeck:
     total_price_missing: float = 0.0
     pip_analysis: object = None      # PipAnalysis — pip distribution của deck
     basic_distribution: dict = field(default_factory=dict)  # {color: count} basic lands
+    curve_summary: dict = field(default_factory=dict)        # CMC distribution sau build
+    top_chain_buffs: list = field(default_factory=list)      # top chain-buffed cards
 
 
 def build_deck(
     commander_name: str,
     commander_slug: str,
     partner_name: str | None = None,
+    archetype: str = "generic",
 ) -> BuiltDeck:
     """
     Build deck tốt nhất cho commander từ collection + ghi nhận card thiếu.
@@ -134,7 +138,17 @@ def build_deck(
                 "price_usd": _get_price(card_row),
             })
 
-    # Sort each pool: owned first, then by synergy desc
+    # Khởi tạo DynamicScorer cho curve penalty + chain buff
+    oracle_texts_for_dynamic = {
+        name: (scryfall_data.get(name) or {}).get("oracle_text", "") or ""
+        for name in legal_names
+    }
+    dynamic_scorer = DynamicScorer(archetype=archetype)
+    dynamic_scorer.set_oracle_index(oracle_texts_for_dynamic)
+
+    # Sort each pool: owned first, then by dynamic adjusted synergy desc
+    # Note: dynamic_score sẽ thay đổi theo thời gian khi deck được build,
+    # nên sort ban đầu chỉ dùng base synergy — re-evaluate khi pick
     for slot in slot_pools:
         slot_pools[slot].sort(
             key=lambda c: (not c["is_owned"], -c["synergy"])
@@ -201,35 +215,46 @@ def build_deck(
                 _basic_dist_ref[0] = distribution
             continue
 
-        # Slots khac: xu ly binh thuong (non-basic singleton)
-        for card in pool:
+        # Slots khac: dùng dynamic scoring (curve penalty + chain buff)
+        # Re-sort pool theo dynamic score trước khi pick
+        # Lazy re-sort: chỉ sort khi có chain buff đã thay đổi
+        dynamic_pool = sorted(
+            [c for c in pool if c["name"] not in used_names and not bl.is_basic_land(c["name"])],
+            key=lambda c: (not c["is_owned"], -dynamic_scorer.adjust_score(c))
+        )
+        for card in dynamic_pool:
             if count >= target:
                 break
             if card["name"] in used_names:
                 continue
-            if bl.is_basic_land(card["name"]):
-                continue
             used_names.add(card["name"])
             selected.append(card)
             if not card["is_owned"]:
                 missing.append(card)
+            # Cập nhật state sau mỗi pick
+            dynamic_scorer.register_pick(card)
             count += 1
 
-    # 8. Fill thieu vao slot synergy neu < 99
+    # 8. Fill thieu vao slot synergy neu < 99 — dùng dynamic scoring
     remaining_slots = 99 - len(selected)
     if remaining_slots > 0:
         synergy_pool = slot_pools.get("synergy", [])
-        for card in synergy_pool:
+        # Re-sort theo dynamic score để chain buff được áp dụng
+        dynamic_synergy = sorted(
+            [c for c in synergy_pool
+             if c["name"] not in used_names and not bl.is_basic_land(c["name"])],
+            key=lambda c: (not c["is_owned"], -dynamic_scorer.adjust_score(c))
+        )
+        for card in dynamic_synergy:
             if remaining_slots <= 0:
                 break
             if card["name"] in used_names:
                 continue
-            if bl.is_basic_land(card["name"]):
-                continue
             used_names.add(card["name"])
             selected.append(card)
             if not card["is_owned"]:
                 missing.append(card)
+            dynamic_scorer.register_pick(card)
             remaining_slots -= 1
 
     # 9. Score deck
@@ -262,6 +287,8 @@ def build_deck(
         total_price_missing=total_missing_price,
         pip_analysis=_pip_analysis_ref[0],
         basic_distribution=_basic_dist_ref[0],
+        curve_summary=dynamic_scorer.get_curve_summary(),
+        top_chain_buffs=dynamic_scorer.get_top_buffed_cards(5),
     )
 
 

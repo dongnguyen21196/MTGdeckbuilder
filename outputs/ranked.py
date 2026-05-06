@@ -99,6 +99,13 @@ def _print_deck_detail(rank: int, deck: BuiltDeck, sc: DeckScoreBreakdown):
             for pair_str in ch.top_pairs[:3]:
                 print(f"         • {pair_str}")
 
+    # Chain buffs applied during build
+    if deck.top_chain_buffs:
+        buff_str = ", ".join(
+            f"{name}(×{mult:.1f})" for name, mult in deck.top_chain_buffs[:3]
+        )
+        print(f"       Chain buffs: {buff_str}")
+
     # Card highlights
     top_owned = sorted(
         [c for c in deck.cards if c.is_owned],
