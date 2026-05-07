@@ -144,19 +144,57 @@ def _normalize_card(card: dict) -> dict:
 
     FIX 1: Extract oracle_name riêng biệt với printing name.
     FIX 2: Prices lưu tạm trong _prices key, caller tách ra upsert riêng.
+    FIX 3: oracle_text cho multi-face cards (split/adventure/modal_dfc):
+      Scryfall KHÔNG có top-level oracle_text cho các card này.
+      Thay vào đó, oracle_text nằm trong card_faces[].
+      Ghép cả hai mặt để archetype detection và synergy chain
+      có đủ text để phân tích.
+    FIX 4: Showcase/Promo cards (Godzilla series, Buy-a-Box...):
+      Scryfall dùng oracle_id để link promo name → real card.
+      Dùng oracle_id để lookup tên thật nếu card là promo.
+      oracle_name sẽ là front-face name của oracle card.
     """
     prices = card.get("prices", {})
     legalities = card.get("legalities", {})
     oracle_name = _extract_oracle_name(card)
+    layout = card.get("layout", "")
+    faces = card.get("card_faces", [])
+
+    # FIX 3: Ghép oracle_text từ tất cả card faces
+    # Ưu tiên top-level oracle_text nếu có (normal cards).
+    # Với split/adventure/modal_dfc: top-level oracle_text = None.
+    top_oracle = card.get("oracle_text")
+    if top_oracle:
+        oracle_text = top_oracle
+    elif faces:
+        # Ghép oracle text các mặt, ngăn cách bằng "\n---\n"
+        # để archetype/chain detection biết đây là 2 phần khác nhau
+        face_texts = [
+            f.get("oracle_text", "") for f in faces
+            if f.get("oracle_text")
+        ]
+        oracle_text = "\n---\n".join(face_texts)
+    else:
+        oracle_text = ""
+
+    # Mana cost: top-level hoặc từ front face (split cards)
+    mana_cost = card.get("mana_cost")
+    if not mana_cost and faces:
+        mana_cost = faces[0].get("mana_cost", "")
+
+    # Type line: ghép tất cả faces nếu top-level trống
+    type_line = card.get("type_line", "")
+    if not type_line and faces:
+        type_line = " // ".join(f.get("type_line", "") for f in faces if f.get("type_line"))
 
     return {
         "name":           card.get("name", ""),
         "oracle_name":    oracle_name,
         "oracle_id":      card.get("oracle_id", ""),
-        "mana_cost":      card.get("mana_cost", ""),
+        "mana_cost":      mana_cost or "",
         "cmc":            card.get("cmc", 0.0),
-        "type_line":      card.get("type_line", ""),
-        "oracle_text":    card.get("oracle_text", ""),
+        "type_line":      type_line,
+        "oracle_text":    oracle_text,
         "color_identity": json.dumps(card.get("color_identity", [])),
         "keywords":       json.dumps(card.get("keywords", [])),
         "legalities":     json.dumps(legalities),
@@ -174,27 +212,49 @@ def _extract_oracle_name(card: dict) -> str:
     """
     Lấy oracle_name (tên canonical) từ Scryfall card object.
 
-    FIX 1 — Reprint dedup rules:
-      - Single-face card: oracle_name = card["name"]
-      - Double-faced card (layout: transform/modal_dfc/...):
-          oracle_name = front face name chỉ
-          Ví dụ: "Delina, Wild Mage // Draconic Destiny" → "Delina, Wild Mage"
-      - Split card (layout: split/adventure):
-          oracle_name = full name giữ cả hai mặt vì là cùng physical card
-          Ví dụ: "Fire // Ice" → "Fire // Ice"
+    Rules theo layout:
+      normal/flip:     oracle_name = card["name"]
+      transform/modal_dfc/meld/reversible:
+                       oracle_name = front face name only
+                       "Birgi, God of Storytelling // Harnfel" → "Birgi, God of Storytelling"
+      split (Fire//Ice, Dusk//Dawn, Wear//Tear):
+                       oracle_name = full combined name (là 1 physical card)
+                       "Fire // Ice" → "Fire // Ice"
+      adventure (Murderous Rider // Swift End):
+                       oracle_name = creature face name only
+                       Lý do: card được nhận diện bởi creature name trong gameplay,
+                       adventure spell là optional ability — không phải separate card.
+                       "Murderous Rider // Swift End" → "Murderous Rider"
 
-    Dùng oracle_id để group reprints về cùng oracle_name.
+    FIX 4 — Showcase/Promo cards:
+      Cards như "Godzilla, King of the Monsters" là promo print của
+      "Zilortha, Strength Incarnate". Scryfall response có field
+      "flavor_name" chứa promo name — tên thật nằm trong "name".
+      Với promo cards: oracle_name = card["name"] (tên thật từ Scryfall)
+      Không cần xử lý đặc biệt vì Scryfall /cards/named?fuzzy= tự resolve
+      promo name → real card và trả về real name trong "name" field.
     """
     layout = card.get("layout", "")
     name = card.get("name", "")
+    faces = card.get("card_faces", [])
 
-    # Double-faced: chỉ lấy front face
+    # Transform/modal_dfc/meld: lấy front face
     if layout in ("transform", "modal_dfc", "meld", "reversible_card"):
-        faces = card.get("card_faces", [])
         if faces:
             return faces[0].get("name", name)
+        # Fallback: nếu không có faces, lấy phần trước //
+        if " // " in name:
+            return name.split(" // ")[0].strip()
 
-    # Split/adventure: giữ full name (Fire // Ice là 1 card)
+    # Adventure: lấy creature face (face[0]) — không phải full name
+    if layout == "adventure":
+        if faces:
+            return faces[0].get("name", name)
+        if " // " in name:
+            return name.split(" // ")[0].strip()
+
+    # Split, aftermath, fuse: giữ full name (là 1 physical card duy nhất)
+    # "Fire // Ice", "Dusk // Dawn", "Wear // Tear" → giữ nguyên
     return name
 
 
@@ -276,15 +336,67 @@ def is_commander_legal(card_data: dict) -> bool:
     return legalities.get("commander", "not_legal") == "legal"
 
 
-def _to_slug(name: str) -> str:
+# DFC/adventure layouts: slug dùng front face
+# Split/aftermath/fuse layouts: slug giữ cả hai phần (fire-ice, dusk-dawn)
+# Nhận diện qua heuristic: split cards thường có 2 tên đều ngắn (1-2 từ)
+# DFC/modal_dfc thường có tên dài, chứa dấu phẩy hoặc danh hiệu
+_KNOWN_SPLIT_CARDS: frozenset = frozenset([
+    # Thêm vào khi cần — heuristic xử lý được phần lớn
+])
+
+
+def _to_slug(name: str, layout: str = "") -> str:
     """
     Chuyển card name thành EDHREC slug format.
-    Handle double-faced, smart quotes, và ký tự đặc biệt MTG.
+
+    Rules theo layout:
+      transform/modal_dfc/adventure (DFC): front face only
+        "Murderous Rider // Swift End" → "murderous-rider"
+        "Birgi, God of Storytelling // Harnfel" → "birgi-god-of-storytelling"
+
+      split/aftermath/fuse: giữ cả hai phần với dấu gạch ngang
+        "Fire // Ice" → "fire-ice"
+        "Dusk // Dawn" → "dusk-dawn"
+        "Wear // Tear" → "wear-tear"
+
+    Heuristic khi không có layout info:
+      Nếu cả hai nửa đều ngắn (≤ 3 từ), coi là split → giữ cả hai.
+      Nếu một nửa dài hoặc có dấu phẩy, coi là DFC → front face only.
     """
     if " // " in name:
-        name = name.split(" // ")[0].strip()
+        parts = name.split(" // ")
+        front, back = parts[0].strip(), parts[1].strip()
+
+        # Layout rõ ràng
+        if layout in ("transform", "modal_dfc", "meld", "adventure", "flip"):
+            name = front
+        elif layout in ("split", "aftermath"):
+            # Giữ cả hai: "Fire // Ice" → "fire-ice"
+            slug_front = re.sub(r"[',\.!?:;]", "", front.lower())
+            slug_front = re.sub(r"[^a-z0-9]+", "-", slug_front).strip("-")
+            slug_back  = re.sub(r"[',\.!?:;]", "", back.lower())
+            slug_back  = re.sub(r"[^a-z0-9]+", "-", slug_back).strip("-")
+            return f"{slug_front}-{slug_back}"
+        else:
+            # Heuristic: đếm từ trong mỗi nửa
+            # Split: cả hai ngắn (Fire, Ice, Wear, Tear, Dusk, Dawn)
+            # DFC: ít nhất một nửa dài hoặc có dấu phẩy
+            front_words = len(front.split())
+            back_words  = len(back.split())
+            has_comma   = "," in front or "," in back
+            if front_words == 1 and back_words == 1:
+                # Split card: giữ cả hai
+                slug_f = re.sub(r"[',\.!?:;]", "", front.lower())
+                slug_f = re.sub(r"[^a-z0-9]+", "-", slug_f).strip("-")
+                slug_b = re.sub(r"[',\.!?:;]", "", back.lower())
+                slug_b = re.sub(r"[^a-z0-9]+", "-", slug_b).strip("-")
+                return f"{slug_f}-{slug_b}"
+            else:
+                # DFC/adventure: front face only
+                name = front
+
     slug = name.lower()
-    slug = re.sub(r"[',\\.!?:;]", "", slug)
+    slug = re.sub(r"[',\.!?:;]", "", slug)
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = slug.strip("-")
     return slug

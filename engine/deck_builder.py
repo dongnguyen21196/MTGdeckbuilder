@@ -444,8 +444,15 @@ def _classify_card(name: str, card_row: dict, edhrec_row: dict, slots_config: di
     if bl.is_basic_land(name):
         return "land"
 
-    type_line = card_row.get("type_line", "").lower() if card_row else ""
+    type_line_raw = card_row.get("type_line", "") if card_row else ""
+    # Adventure/split type_line: "Creature // Instant" → dùng FIRST part để classify
+    # Tránh "Land" check false positive từ second face
+    type_line = type_line_raw.split(" // ")[0].lower() if type_line_raw else ""
+    # Oracle text đã được ghép cả 2 mặt trong _normalize_card (--- separator)
+    # Dùng toàn bộ để detect slot keywords (ramp, draw, removal...)
     oracle = card_row.get("oracle_text", "").lower() if card_row else ""
+    # Strip face separator để không confuse keyword matching
+    oracle = oracle.replace("\n---\n", " ")
     edhrec_slot = edhrec_row.get("slot_tag", "") or ""
 
     # --- Bước 1: EDHREC tag (nguồn chính) ---
