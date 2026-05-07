@@ -129,10 +129,17 @@ def build_deck(
         if slot:
             slots_config_slot = slots_config.get(slot, slots_config.get("synergy"))
             slots_config[slot]  # ensure slot exists
+            raw_synergy = edhrec_row.get("synergy", 0.0)
+            # FIX: non-basic lands dùng utility score để bù staple lands
+            # có EDHREC synergy âm/thấp (quá phổ biến = không "đặc biệt" với EDHREC)
+            if slot == "land" and not bl.is_basic_land(name):
+                effective_synergy = _land_utility_score(name, raw_synergy)
+            else:
+                effective_synergy = raw_synergy
             slot_pools.setdefault(slot, []).append({
                 "name": name,
                 "slot": slot,
-                "synergy": edhrec_row.get("synergy", 0.0),
+                "synergy": effective_synergy,
                 "is_owned": name in collection_names,
                 "cmc": card_row.get("cmc", 0.0) if card_row else 0.0,
                 "type_line": card_row.get("type_line", "") if card_row else "",
@@ -207,9 +214,16 @@ def build_deck(
     _basic_dist_ref:   list = [{}]
 
     # ── Step 7a: Land slot (xử lý riêng, không vào pool) ──────────────────
+    # FIX: Non-basic lands sorted by synergy DESC + owned first.
+    # EDHREC có synergy scores cho non-basic lands (Cabal Coffers ~0.15,
+    # Command Tower ~0.05, etc.) nhưng trước đây chúng được add không theo thứ tự.
+    # Utility lands quan trọng (Maze of Ith, Cabal Coffers) giờ được ưu tiên.
     land_pool = slot_pools.get("land", [])
     land_count = 0
-    non_basics = [c for c in land_pool if not bl.is_basic_land(c["name"])]
+    non_basics = sorted(
+        [c for c in land_pool if not bl.is_basic_land(c["name"])],
+        key=lambda c: (not c["is_owned"], -(c["synergy"] or 0.0))
+    )
     for card in non_basics:
         if land_count >= LAND_TARGET:
             break
@@ -312,12 +326,15 @@ def build_deck(
         _basic_dist_ref[0]   = distribution
 
     # 9. Score deck
-    # FIX: tách avg_synergy khỏi basic lands (synergy=0 làm lệch score).
-    # Chỉ tính non-land cards cho avg_synergy.
-    non_land_cards = [c for c in selected if c["slot"] != "land"]
+    # FIX avg_synergy: loại BASIC lands (synergy=0) ra — chúng không có EDHREC score.
+    # Non-basic lands GIỮ LẠI vì có utility score thực (Command Tower, Cabal Coffers...).
+    # Basic land được nhận ra qua is_basic_land() — chính xác hơn check slot="land"
+    # vì non-basic lands cũng có slot="land".
+    from filters.banned_list import is_basic_land as _is_basic
+    scoring_cards = [c for c in selected if not _is_basic(c["name"])]
     owned_count = sum(1 for c in selected if c["is_owned"])
     avg_synergy = (
-        sum(c["synergy"] for c in non_land_cards) / max(len(non_land_cards), 1)
+        sum(c["synergy"] for c in scoring_cards) / max(len(scoring_cards), 1)
     )
     coverage = owned_count / max(len(selected), 1)
     slot_balance = _score_slot_balance(selected, slot_targets)
@@ -541,6 +558,80 @@ def _pick_basic_lands(
             "price_usd": None,
         })
     return result
+# ── Known high-value utility lands ────────────────────────────────────────────
+# Staple lands có synergy âm hoặc thấp trên EDHREC (quá phổ biến = không "đặc biệt")
+# nhưng thực ra rất quan trọng. Bù bằng utility score riêng.
+_UTILITY_LAND_SCORES: dict[str, float] = {
+    # Mana fixing staples — quan trọng với mọi multicolor deck
+    "command tower":                   0.18,
+    "arcane sanctum":                  0.10,
+    "path of ancestry":                0.10,
+    "exotic orchard":                  0.10,
+    "mana confluence":                 0.12,
+    "city of brass":                   0.12,
+    "reflecting pool":                 0.12,
+    # Black utility — mana doubling
+    "cabal coffers":                   0.22,
+    "cabal stronghold":                0.12,
+    "urborg, tomb of yawgmoth":        0.18,
+    # Defensive / control utility
+    "maze of ith":                     0.15,
+    "glacial chasm":                   0.10,
+    # Green utility
+    "nykthos, shrine to nyx":          0.20,
+    "cradle":                          0.25,
+    "gaea's cradle":                   0.25,
+    # Colorless utility
+    "reliquary tower":                 0.10,
+    "field of the dead":               0.15,
+    "dark depths":                     0.12,
+    "strip mine":                      0.10,
+    "wasteland":                       0.10,
+    "hall of heliod's generosity":     0.10,
+    "high market":                     0.08,
+    "phyrexian tower":                 0.10,
+    "bojuka bog":                      0.08,
+    "war room":                        0.10,
+    # Fetches — fixing + graveyard synergy
+    "polluted delta":                  0.12,
+    "flooded strand":                  0.12,
+    "bloodstained mire":               0.12,
+    "wooded foothills":                0.12,
+    "windswept heath":                 0.12,
+    "verdant catacombs":               0.12,
+    "misty rainforest":                0.12,
+    "scalding tarn":                   0.12,
+    "arid mesa":                       0.12,
+    "marsh flats":                     0.12,
+    # Shocks — dual color fixing
+    "breeding pool":                   0.10,
+    "hallowed fountain":               0.10,
+    "watery grave":                    0.10,
+    "blood crypt":                     0.10,
+    "stomping ground":                 0.10,
+    "temple garden":                   0.10,
+    "godless shrine":                  0.10,
+    "sacred foundry":                  0.10,
+    "steam vents":                     0.10,
+    "overgrown tomb":                  0.10,
+}
+
+def _land_utility_score(card_name: str, synergy: float) -> float:
+    """
+    Tính effective score cho non-basic land.
+
+    Vấn đề: EDHREC synergy đo "phổ biến hơn baseline" — staple lands
+    (Command Tower, Cabal Coffers) có synergy âm/thấp vì quá phổ biến
+    nên không được coi là đặc biệt. Thực tế chúng rất quan trọng.
+
+    Giải pháp: dùng max(edhrec_synergy, _UTILITY_LAND_SCORES.get(name, 0))
+    Card không trong danh sách → dùng EDHREC synergy gốc.
+    Card trong danh sách → lấy score cao hơn giữa EDHREC và utility.
+    """
+    utility = _UTILITY_LAND_SCORES.get(card_name.lower(), 0.0)
+    return max(synergy or 0.0, utility)
+
+
 def _get_price(card_row: dict | None) -> float | None:
     """
     Lấy giá USD cho card.
