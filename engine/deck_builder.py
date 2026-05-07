@@ -146,11 +146,46 @@ def build_deck(
                 "price_usd": _get_price(card_row),
             })
 
-    # Khởi tạo DynamicScorer cho curve penalty + chain buff
+    # Khởi tạo oracle text lookup (dùng cho cả archetype detect lẫn dynamic scoring)
     oracle_texts_for_dynamic = {
         name: (scryfall_data.get(name) or {}).get("oracle_text", "") or ""
         for name in legal_names
     }
+
+    # FIX: Detect archetype từ EDHREC pool TRƯỚC khi build
+    # Lý do: archetype="generic" được truyền vào default khi CLI gọi build_deck().
+    # Dynamic slot targets và curve targets phụ thuộc archetype — nếu dùng "generic"
+    # thì toàn bộ slot_config adjustments (combo/control/aggro...) bị bỏ qua.
+    #
+    # Cách detect: tạo mock DeckCard objects từ EDHREC pool (chưa pick),
+    # chạy detect_archetype() trên top-N cards có synergy cao nhất.
+    # Dùng top 60 thay vì toàn bộ 294 để tránh nhiễu từ off-theme cards.
+    if archetype == "generic":
+        # Chỉ auto-detect khi không có archetype được chỉ định rõ
+        _top_pool_cards = sorted(
+            [c for slot_cards in slot_pools.values()
+             for c in slot_cards
+             if c["slot"] != "land"],
+            key=lambda c: -(c["synergy"] or 0.0)
+        )[:60]
+        _mock_cards = [
+            type("_MC", (), {
+                "name": c["name"], "slot": c["slot"],
+                "synergy": c["synergy"], "is_owned": c["is_owned"],
+                "cmc": c["cmc"] or 0.0, "type_line": c["type_line"] or "",
+                "price_usd": None
+            })()
+            for c in _top_pool_cards
+        ]
+        from engine.archetype import detect_archetype as _detect_archetype_early  # lazy — tránh circular import
+        _detected = _detect_archetype_early(_mock_cards, oracle_texts_for_dynamic)
+        if _detected.confidence >= 0.35:
+            archetype = _detected.primary
+            print(f"  Auto-detected archetype: {archetype} "
+                  f"(confidence={_detected.confidence:.0%})")
+        else:
+            print(f"  Archetype unclear ({_detected.confidence:.0%}), using generic")
+
     dynamic_scorer = DynamicScorer(archetype=archetype)
     dynamic_scorer.set_oracle_index(oracle_texts_for_dynamic)
 

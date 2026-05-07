@@ -274,7 +274,7 @@ def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
 
     composite = (
         0.50 * overlap_pct
-        + 0.25 * min(avg_synergy * 4, 1.0)  # normalize: synergy avg ~0.10 = 0.4
+        + 0.25 * min(avg_synergy * 5, 1.0)  # normalize: synergy avg ~0.10 = 0.5 (nhất quán với deck_builder + scorer)
         + 0.15 * redundancy_score
         + 0.10 * cmc_score
         + owned_bonus
