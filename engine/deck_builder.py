@@ -228,14 +228,28 @@ def build_deck(
         partner_data_for_cmc = cmd_data_rows.get(partner_name, {})
         partner_cmc = partner_data_for_cmc.get("cmc", 0.0) or 0.0
 
+    # num_colors từ commander color identity — dùng cho land formula
+    num_colors = len(commander_colors) if commander_colors else 3
+    # avg_deck_cmc: ước tính từ EDHREC pool (dùng top-30 non-land cards)
+    _cmc_sample = [
+        c["cmc"] for slot_cards in slot_pools.values()
+        for c in slot_cards
+        if c["slot"] != "land" and c.get("cmc") is not None
+    ][:30]
+    avg_deck_cmc_est = (sum(_cmc_sample) / len(_cmc_sample)) if _cmc_sample else 3.2
+
     slot_targets = get_slot_targets(
         archetype=archetype,
         commander_cmc=commander_cmc,
         partner_cmc=partner_cmc,
+        num_colors=num_colors,
+        avg_deck_cmc=avg_deck_cmc_est,
     )
-    adj_desc = describe_adjustments(archetype, commander_cmc, slot_targets)
-    if adj_desc and "no adjustments" not in adj_desc:
-        print(f"  Slot adjustments: {adj_desc}")
+    adj_desc = describe_adjustments(
+        archetype, commander_cmc, slot_targets,
+        num_colors=num_colors, avg_deck_cmc=avg_deck_cmc_est,
+    )
+    print(f"  Slot adjustments: {adj_desc}")
 
     selected: list[dict] = []
     missing:  list[dict] = []

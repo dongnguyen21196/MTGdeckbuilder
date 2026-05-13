@@ -107,19 +107,86 @@ _CMC_RAMP_BASE = 4
 _CMC_RAMP_SCALE = 1.5
 
 
+# ── Land target constants ──────────────────────────────────────────────────────
+# Nguồn: EDHREC Superior Numbers — Nate Burgess formula
+# "Number of lands = 31 + num_colors + commander_cmc"
+# (với 0-CMC mana rocks đếm như lands, nhưng không track ở đây)
+_LAND_BASE        = 31
+_LAND_MIN         = 33   # deck combo/aggro curve thấp
+_LAND_MAX         = 40   # 5-color deck CMC cao (slots.json max)
+
+# Avg CMC → land adjustment (từ cEDH Nexus + EDHREC data):
+# avg CMC < 2.5 → giảm thêm 2 (cEDH-style, rất ít land)
+# avg CMC 2.5–3.5 → không đổi
+# avg CMC > 3.5 → tăng thêm 1
+_AVG_CMC_LAND_CUTS: list[tuple[float, int]] = [
+    (2.0, -3),   # avg CMC ≤ 2.0 → -3 land
+    (2.5, -2),   # avg CMC ≤ 2.5 → -2 land
+    (3.0, -1),   # avg CMC ≤ 3.0 → -1 land
+    (3.5,  0),   # avg CMC ≤ 3.5 → baseline
+    (4.5,  1),   # avg CMC ≤ 4.5 → +1 land
+    (99.0, 2),   # avg CMC > 4.5 → +2 land
+]
+
+
+def calc_land_target(
+    num_colors: int,
+    commander_cmc: float,
+    avg_deck_cmc: float = 3.2,
+) -> int:
+    """
+    Tính số land tối ưu theo EDHREC Superior Numbers formula:
+      land = 31 + num_colors + commander_cmc
+
+    Điều chỉnh thêm theo avg CMC thực tế của deck:
+      avg CMC thấp (combo/aggro) → ít land hơn
+      avg CMC cao (battlecruiser) → nhiều land hơn
+
+    Args:
+        num_colors:    số màu trong color identity (1-5)
+        commander_cmc: CMC của commander
+        avg_deck_cmc:  avg CMC của deck sau khi build (default 3.2 nếu chưa biết)
+
+    Returns:
+        int: số land target, capped trong [_LAND_MIN, _LAND_MAX]
+
+    Ví dụ:
+        Mono-color CMC=3:   31+1+3 = 35
+        2-color CMC=2:      31+2+2 = 35
+        4-color CMC=5:      31+4+5 = 40 (capped)
+        5-color CMC=7:      31+5+7 = 43 → 40 (capped)
+        Tymna+Thrasios:     31+4+2 = 37 (partner, CMC thấp)
+    """
+    base = _LAND_BASE + num_colors + int(round(commander_cmc))
+
+    # Adjust theo avg CMC
+    cmc_adj = 0
+    for threshold, adjustment in _AVG_CMC_LAND_CUTS:
+        if avg_deck_cmc <= threshold:
+            cmc_adj = adjustment
+            break
+
+    land = base + cmc_adj
+    return max(_LAND_MIN, min(_LAND_MAX, land))
+
+
 def get_slot_targets(
     archetype: str = "generic",
     commander_cmc: float = 3.0,
     partner_cmc: float = 0.0,
+    num_colors: int = 3,
+    avg_deck_cmc: float = 3.2,
 ) -> dict[str, int]:
     """
-    Trả về slot targets điều chỉnh theo archetype và commander CMC.
+    Trả về slot targets điều chỉnh theo archetype, commander CMC,
+    số màu, và avg CMC của deck.
 
     Args:
-        archetype:     archetype đã detect ("combo", "control", "aggro",
-                       "stax", "midrange", "generic")
+        archetype:     archetype đã detect
         commander_cmc: CMC của commander chính
         partner_cmc:   CMC của partner (nếu có), 0 nếu không
+        num_colors:    số màu trong color identity (1-5) — dùng cho land target
+        avg_deck_cmc:  avg CMC deck (sau build hoặc ước tính) — dùng cho land
 
     Returns:
         dict {slot: target_count} đã điều chỉnh
@@ -135,8 +202,17 @@ def get_slot_targets(
     overrides = _ARCHETYPE_OVERRIDES.get(archetype, {})
     targets = {**baseline, **overrides}
 
+    # V1 FIX: Land target theo num_colors + commander CMC + avg deck CMC
+    # Thay thế LAND_TARGET = 37 cứng
+    effective_cmc_for_land = commander_cmc
+    if partner_cmc > 0:
+        # Partner: dùng tổng CMC chia 2 (cả hai đều cần cast)
+        effective_cmc_for_land = (commander_cmc + partner_cmc) / 2
+
+    land_target = calc_land_target(num_colors, effective_cmc_for_land, avg_deck_cmc)
+    targets["land"] = land_target
+
     # V7: Adjust ramp theo commander CMC
-    # Với partner, dùng CMC thấp hơn (thường cast partner có CMC nhỏ trước)
     effective_cmc = commander_cmc
     if partner_cmc > 0:
         effective_cmc = min(commander_cmc, partner_cmc)
@@ -145,7 +221,7 @@ def get_slot_targets(
     new_ramp = int(round(targets.get("ramp", 10) + cmc_ramp_bonus))
     targets["ramp"] = min(new_ramp, slot_max.get("ramp", 14))
 
-    # Đảm bảo không xuống dưới min
+    # Đảm bảo không xuống dưới min / vượt max
     for slot in targets:
         if slot in slot_min:
             targets[slot] = max(targets[slot], slot_min[slot])
@@ -160,6 +236,8 @@ def describe_adjustments(
     commander_cmc: float,
     targets: dict[str, int],
     baseline: dict[str, int] | None = None,
+    num_colors: int = 3,
+    avg_deck_cmc: float = 3.2,
 ) -> str:
     """Human-readable mô tả các điều chỉnh so với baseline."""
     if baseline is None:
@@ -167,6 +245,16 @@ def describe_adjustments(
             baseline = {s: d["target"] for s, d in json.load(f)["slots"].items()}
 
     parts = []
+
+    # Luôn hiển thị land target vì đây là thay đổi quan trọng
+    land_new = targets.get("land", 37)
+    land_old = baseline.get("land", 37)
+    land_sign = "+" if land_new > land_old else ""
+    parts.append(
+        f"land={land_new}({land_sign}{land_new - land_old})"
+        f"[{num_colors}色+CMC{commander_cmc:.0f}+avgCMC{avg_deck_cmc:.1f}]"
+    )
+
     for slot, new_val in targets.items():
         if slot == "land":
             continue
@@ -174,8 +262,5 @@ def describe_adjustments(
         if new_val != old_val:
             sign = "+" if new_val > old_val else ""
             parts.append(f"{slot}={new_val}({sign}{new_val - old_val})")
-
-    if not parts:
-        return f"Archetype={archetype}, CMC={commander_cmc:.0f} → no adjustments"
 
     return f"Archetype={archetype}, CMC={commander_cmc:.0f} → {', '.join(parts)}"
