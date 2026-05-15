@@ -113,7 +113,7 @@ _CMC_RAMP_SCALE = 1.5
 # (với 0-CMC mana rocks đếm như lands, nhưng không track ở đây)
 _LAND_BASE        = 31
 _LAND_MIN         = 33   # deck combo/aggro curve thấp
-_LAND_MAX         = 40   # 5-color deck CMC cao (slots.json max)
+_LAND_MAX         = 35   # hard cap — maximum 35 lands per deck
 
 # Avg CMC → land adjustment (từ cEDH Nexus + EDHREC data):
 # avg CMC < 2.5 → giảm thêm 2 (cEDH-style, rất ít land)
@@ -153,9 +153,9 @@ def calc_land_target(
     Ví dụ:
         Mono-color CMC=3:   31+1+3 = 35
         2-color CMC=2:      31+2+2 = 35
-        4-color CMC=5:      31+4+5 = 40 (capped)
-        5-color CMC=7:      31+5+7 = 43 → 40 (capped)
-        Tymna+Thrasios:     31+4+2 = 37 (partner, CMC thấp)
+        4-color CMC=5:      31+4+5 = 40 → 35 (capped)
+        5-color CMC=7:      31+5+7 = 43 → 35 (capped)
+        Tymna+Thrasios:     31+4+2 = 37 → 35 (capped)
     """
     base = _LAND_BASE + num_colors + int(round(commander_cmc))
 
