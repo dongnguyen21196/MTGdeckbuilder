@@ -115,6 +115,9 @@ def cleanup() -> int:
     days = int(os.getenv("SESSION_RETENTION_DAYS", "30"))
     removed = cache.drop_stale_sessions(days)
     log(f"→ Dọn {removed} dòng collection cũ hơn {days} ngày")
+
+    buckets = cache.drop_stale_rate_limits(24)
+    log(f"→ Dọn {buckets} bộ đếm rate limit đã hết cửa sổ")
     return removed
 
 

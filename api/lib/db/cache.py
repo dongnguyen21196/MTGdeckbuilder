@@ -52,6 +52,7 @@ _TABLES = [
     "edhrec_data",
     "banned_list",
     "commanders",
+    "rate_limit",
 ]
 
 # Session của request đang chạy. Chỉ các hàm collection dùng tới.
@@ -212,6 +213,13 @@ CREATE TABLE IF NOT EXISTS commanders (
     partner_name   text,
     fetched_at     timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS rate_limit (
+    bucket       text PRIMARY KEY,
+    window_start timestamptz NOT NULL DEFAULT now(),
+    hits         integer NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_window ON rate_limit(window_start);
 """
 
 
@@ -228,6 +236,59 @@ def drop_stale_sessions(older_than_days: int = 30) -> int:
         cur.execute(
             "DELETE FROM collection WHERE imported_at < now() - make_interval(days => %s)",
             (older_than_days,),
+        )
+        return cur.rowcount
+
+
+# ── Rate limit ────────────────────────────────────────────────────────────────
+
+# Cửa sổ cố định. Cả việc tăng bộ đếm lẫn việc reset khi hết cửa sổ đều nằm
+# trong một câu lệnh, nên mỗi lần kiểm tra chỉ tốn một round trip — quan trọng
+# vì DB ở đầu kia đường mạng, không phải ổ đĩa local.
+_RATE_LIMIT_SQL = """
+INSERT INTO rate_limit (bucket, window_start, hits)
+VALUES (%(bucket)s, now(), 1)
+ON CONFLICT (bucket) DO UPDATE SET
+    hits = CASE
+        WHEN rate_limit.window_start <= now() - make_interval(secs => %(window)s)
+        THEN 1 ELSE rate_limit.hits + 1
+    END,
+    window_start = CASE
+        WHEN rate_limit.window_start <= now() - make_interval(secs => %(window)s)
+        THEN now() ELSE rate_limit.window_start
+    END
+RETURNING
+    hits,
+    CEIL(EXTRACT(EPOCH FROM
+        (window_start + make_interval(secs => %(window)s) - now())
+    ))::int AS reset_in
+"""
+
+
+def hit_rate_limit(bucket: str, window_seconds: int) -> tuple[int, int]:
+    """Tăng bộ đếm của `bucket` lên 1, trả về (số lần trong cửa sổ, số giây
+    còn lại tới khi reset). Người gọi tự so với ngưỡng."""
+    params = {"bucket": bucket, "window": window_seconds}
+    try:
+        with cursor() as cur:
+            cur.execute(_RATE_LIMIT_SQL, params)
+            row = cur.fetchone()
+    except psycopg.errors.UndefinedTable:
+        # Deploy đầu tiên sau khi thêm bảng: schema là DDL idempotent nên tạo
+        # tại chỗ rồi thử lại, khỏi phải chờ seeder chạy đêm.
+        init_db()
+        with cursor() as cur:
+            cur.execute(_RATE_LIMIT_SQL, params)
+            row = cur.fetchone()
+    return row["hits"], max(row["reset_in"], 1)
+
+
+def drop_stale_rate_limits(older_than_hours: int = 24) -> int:
+    """Dọn bộ đếm của cửa sổ đã đóng. Seeder gọi hàng đêm."""
+    with cursor() as cur:
+        cur.execute(
+            "DELETE FROM rate_limit WHERE window_start < now() - make_interval(hours => %s)",
+            (older_than_hours,),
         )
         return cur.rowcount
 

@@ -20,6 +20,7 @@ from engine.deck_builder import build_deck
 from engine.scorer import score_deck
 from enrichers import scryfall
 
+import ratelimit
 import serializers
 
 router = APIRouter()
@@ -99,6 +100,7 @@ async def import_collection(
 ):
     """Nhận CSV export của Archidekt, lưu vào collection của session hiện tại,
     rồi enrich oracle data cho những card chưa có trong cache."""
+    ratelimit.enforce(request, "import")
     _bind_session(request, response)
 
     raw = await file.read()
@@ -170,6 +172,7 @@ def rank_commanders(
     Đây là endpoint nặng nhất. Nó chỉ chạy được trong giới hạn 60s khi dữ liệu
     EDHREC đã seed sẵn — commander nào chưa seed sẽ phải gọi mạng ngay trong
     request, mỗi lần ~1s."""
+    ratelimit.enforce(request, "rank")
     _bind_session(request, response)
 
     if not cache.get_collection_names():
@@ -214,6 +217,7 @@ def build(request: Request, response: Response, body: BuildRequest):
 
     Gộp trong một response vì mỗi lần build tốn vài giây; tách thành 4 endpoint
     sẽ khiến UI phải build lại deck 4 lần cho cùng một commander."""
+    ratelimit.enforce(request, "build")
     _bind_session(request, response)
 
     if not cache.get_collection_names():
