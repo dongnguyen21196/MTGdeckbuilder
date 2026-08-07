@@ -65,23 +65,38 @@ def get_commander_cards(commander_slug: str) -> list[dict]:
     return cards
 
 
+HEADERS      = {"User-Agent": "EDH-Deck-Builder/1.0 (personal use)"}
+MAX_RETRIES  = 4
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
 def _fetch_edhrec(slug: str) -> dict | None:
+    """Lấy JSON của một commander, có backoff khi bị rate-limit.
+
+    Seed đầy đủ gọi ~1.800 lần; không retry thì một lần 429 giết cả job."""
     url = f"{EDHREC_BASE}/{slug}.json"
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": "EDH-Deck-Builder/1.0 (personal use)"},
-            timeout=15,
-        )
-        if resp.status_code == 404:
-            print(f"  [!] Commander không tìm thấy trên EDHREC: {slug}")
+    delay = 2.0
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code == 404:
+                print(f"  [!] Commander không tìm thấy trên EDHREC: {slug}")
+                return None
+            if resp.status_code in RETRY_STATUS:
+                wait = float(resp.headers.get("Retry-After") or delay)
+                print(f"  [!] EDHREC {resp.status_code} cho {slug}, chờ {wait:.0f}s "
+                      f"(lần {attempt}/{MAX_RETRIES})", flush=True)
+                time.sleep(wait)
+                delay = min(delay * 2, 60.0)
+                continue
+            resp.raise_for_status()
+            time.sleep(SLEEP_BETWEEN_REQUESTS)
+            return resp.json()
+        except requests.RequestException as e:
+            print(f"  [!] EDHREC fetch thất bại cho {slug}: {e}")
             return None
-        resp.raise_for_status()
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
-        return resp.json()
-    except requests.RequestException as e:
-        print(f"  [!] EDHREC fetch thất bại cho {slug}: {e}")
-        return None
+    print(f"  [!] EDHREC bỏ qua {slug} sau {MAX_RETRIES} lần thử")
+    return None
 
 
 def _parse_edhrec_response(data: dict) -> list[dict]:

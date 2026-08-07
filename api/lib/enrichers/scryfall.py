@@ -38,6 +38,31 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+MAX_RETRIES  = 5
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _request(method: str, url: str, **kwargs) -> requests.Response:
+    """Gọi Scryfall với backoff khi bị rate-limit.
+
+    Seed đầy đủ bắn vài trăm request; runner GitHub lại dùng IP dùng chung nên
+    dính 429 là chuyện bình thường, không phải lỗi lập trình. Không có backoff
+    thì cả job chết giữa chừng vì một lần 429 duy nhất."""
+    delay = 1.0
+    resp = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        resp = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
+        if resp.status_code not in RETRY_STATUS:
+            resp.raise_for_status()
+            return resp
+        wait = float(resp.headers.get("Retry-After") or delay)
+        print(f"  [!] Scryfall {resp.status_code}, chờ {wait:.0f}s "
+              f"(lần {attempt}/{MAX_RETRIES})", flush=True)
+        time.sleep(wait)
+        delay = min(delay * 2, 30.0)
+    resp.raise_for_status()
+    return resp
+
 
 def enrich_cards(card_names: list[str]) -> dict[str, dict]:
     """
@@ -110,13 +135,11 @@ def _batch_fetch_oracle(names: list[str]) -> dict[str, dict]:
     result = {}
     for i in range(0, len(names), BATCH_SIZE):
         batch = names[i:i + BATCH_SIZE]
-        resp = requests.post(
+        resp = _request(
+            "POST",
             SCRYFALL_COLLECTION_URL,
             json={"identifiers": [{"name": n} for n in batch]},
-            headers=HEADERS,
-            timeout=30,
         )
-        resp.raise_for_status()
         data = resp.json()
         for card in data.get("data", []):
             name = card.get("name", "")
@@ -137,13 +160,11 @@ def _batch_fetch_prices_only(names: list[str]) -> dict[str, dict]:
     result = {}
     for i in range(0, len(names), BATCH_SIZE):
         batch = names[i:i + BATCH_SIZE]
-        resp = requests.post(
+        resp = _request(
+            "POST",
             SCRYFALL_COLLECTION_URL,
             json={"identifiers": [{"name": n} for n in batch]},
-            headers=HEADERS,
-            timeout=30,
         )
-        resp.raise_for_status()
         data = resp.json()
         for card in data.get("data", []):
             prices = card.get("prices", {})
@@ -288,8 +309,7 @@ def fetch_all_commanders() -> list[dict]:
     params = {"q": "is:commander format:commander", "order": "name", "unique": "cards"}
 
     while url:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
+        resp = _request("GET", url, params=params)
         data = resp.json()
 
         for card in data.get("data", []):
@@ -335,8 +355,7 @@ def fetch_banned_list() -> list[str]:
     params = {"q": "banned:commander", "unique": "cards", "order": "name"}
 
     while url:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
+        resp = _request("GET", url, params=params)
         data = resp.json()
         banned.extend(c["name"] for c in data.get("data", []))
         url = data.get("next_page")
