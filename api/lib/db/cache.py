@@ -77,15 +77,36 @@ def current_session() -> str:
     return sid
 
 
+_ENV_PREFIXES = ("DATABASE_URL=", "POSTGRES_URL=")
+
+
 def _dsn() -> str:
-    dsn = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
-    if not dsn:
+    raw = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+    if not raw:
         raise RuntimeError(
             "Thiếu DATABASE_URL. Tạo Neon Postgres trong Vercel Marketplace "
             "hoặc set biến môi trường khi chạy local."
         )
-    # Neon inject sẵn ?sslmode=require; psycopg không hiểu tiền tố postgres://
-    return dsn.replace("postgres://", "postgresql://", 1)
+
+    dsn = raw.strip().strip("\"'")
+    # Copy nguyên dòng từ tab .env của Vercel rồi dán vào secret là lỗi rất dễ
+    # gặp; psycopg sẽ hiểu chuỗi đó là connection string dạng key=value và báo
+    # `invalid connection option "DATABASE_URL"`, chẳng gợi ý gì về nguyên nhân.
+    for prefix in _ENV_PREFIXES:
+        if dsn.startswith(prefix):
+            dsn = dsn[len(prefix):].strip().strip("\"'")
+            break
+
+    if dsn.startswith("postgres://"):
+        # psycopg chỉ nhận scheme postgresql://
+        dsn = "postgresql://" + dsn[len("postgres://"):]
+
+    if not dsn.startswith("postgresql://"):
+        raise RuntimeError(
+            "DATABASE_URL không phải connection string hợp lệ — phải bắt đầu "
+            f"bằng postgresql:// (nhận được: {dsn[:20]!r}…)"
+        )
+    return dsn
 
 
 def get_pool() -> ConnectionPool:
