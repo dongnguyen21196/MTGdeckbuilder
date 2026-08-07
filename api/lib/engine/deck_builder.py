@@ -269,9 +269,19 @@ def build_deck(
     # Utility lands quan trọng (Maze of Ith, Cabal Coffers) giờ được ưu tiên.
     land_pool = slot_pools.get("land", [])
     land_count = 0
+    # Chỉ lấy non-basic land ĐANG SỞ HỮU.
+    #
+    # Trước đây lấy cả land chưa sở hữu cho tới khi đủ LAND_TARGET, nên một
+    # deck điển hình có ~16 land phải đi mua — vô lý, vì mọi deck Commander
+    # đều chạy được basic land và basic thì ai cũng có. Phần slot còn lại để
+    # bước 7d chia basic theo pip.
+    #
+    # Đây cũng là lý do bước 7d trước giờ không bao giờ chạy: pool EDHREC lấp
+    # kín 35 slot nên basic_remaining luôn bằng 0.
     non_basics = sorted(
-        [c for c in land_pool if not bl.is_basic_land(c["name"])],
-        key=lambda c: (not c["is_owned"], -(c["synergy"] or 0.0))
+        [c for c in land_pool
+         if not bl.is_basic_land(c["name"]) and c["is_owned"]],
+        key=lambda c: -(c["synergy"] or 0.0),
     )
     for card in non_basics:
         if land_count >= LAND_TARGET:
@@ -313,7 +323,18 @@ def build_deck(
     # Với 0.25: ramp trống (0/10) thắng cả synergy 0.24, nhưng khi ramp đã 80%
     # (8/10) → hunger=0.05, nhường cho synergy card chất lượng cao. Đúng intent.
     HUNGER_MAX    = 0.25   # bonus tối đa khi slot hoàn toàn trống (tăng từ 0.15)
-    OWNED_BONUS   = 0.05   # nhỏ — owned được ưu tiên nhưng không áp đảo score
+
+    # OWNED_BONUS phải LỚN HƠN toàn bộ dải synergy (0.02–0.30) thì "ưu tiên
+    # card đang sở hữu" mới có nghĩa. Với giá trị cũ 0.05, một card chưa sở
+    # hữu synergy 0.20 (=0.20) vẫn thắng card đang sở hữu synergy 0.10 (=0.15)
+    # — tức bonus chỉ là mức phá hoà, không phải mức ưu tiên. Đó là lý do deck
+    # trả về thiếu tới ~half số card dù collection thừa sức lấp.
+    #
+    # Với 0.35: card sở hữu yếu nhất (0.02+0.35=0.37) vẫn hơn card phải mua
+    # mạnh nhất (0.30). Card chưa sở hữu chỉ lọt vào khi slot đang đói
+    # (hunger tới 0.25) hoặc khi collection không còn gì cho slot đó — đúng
+    # nghĩa "chỉ mua khi không có lựa chọn".
+    OWNED_BONUS   = 0.35
 
     def slot_hunger(slot: str) -> float:
         """Bonus score cho card của slot còn thiếu. = 0 khi slot >= target."""
