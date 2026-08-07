@@ -555,6 +555,29 @@ def get_edhrec_cards(commander_slug: str, max_age_days: int = EDHREC_TTL_DAYS) -
         return cur.fetchall()
 
 
+def get_edhrec_cards_bulk(
+    slugs: list[str], max_age_days: int = EDHREC_TTL_DAYS
+) -> dict[str, list[dict]]:
+    """Bản gộp của `get_edhrec_cards` cho nhiều commander cùng lúc.
+
+    Vòng chấm điểm commander duyệt vài trăm ứng viên; gọi lẻ mỗi ứng viên là
+    vài trăm round trip tới Neon. Cùng lượng dữ liệu, một round trip."""
+    if not slugs:
+        return {}
+    with cursor() as cur:
+        cur.execute(
+            """SELECT * FROM edhrec_data
+               WHERE commander_slug = ANY(%s)
+                 AND fetched_at > now() - make_interval(days => %s)
+               ORDER BY commander_slug, synergy DESC""",
+            (list(slugs), max_age_days),
+        )
+        grouped: dict[str, list[dict]] = {}
+        for row in cur.fetchall():
+            grouped.setdefault(row["commander_slug"], []).append(row)
+    return grouped
+
+
 def get_edhrec_deck_counts(slugs: list[str], max_age_days: int = EDHREC_TTL_DAYS) -> dict[str, int]:
     """Số card đã cache cho mỗi slug. Dùng để biết commander nào đã seed
     mà không phải kéo hết vài trăm nghìn dòng về."""

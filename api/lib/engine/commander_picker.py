@@ -99,9 +99,21 @@ def pick_commanders(
 
     print(f"  Đang score {len(candidates)} commanders...")
 
+    # --- Nạp sẵn dữ liệu cho cả vòng lặp ---
+    # _score_commander cần hai thứ từ DB cho mỗi candidate: pool EDHREC và CMC
+    # của chính commander. Gọi lẻ trong vòng lặp là 2 round trip × số candidate
+    # (~400 với collection thật) tới một database ở đầu kia đường mạng. Nạp
+    # trước bằng hai query gộp, vòng lặp trở thành CPU thuần.
+    prefetched_edhrec = cache.get_edhrec_cards_bulk(
+        [c["slug"] for c in candidates if c["slug"]]
+    )
+    prefetched_cards = cache.get_scryfall_cards([c["name"] for c in candidates])
+
     scored = []
     for cmd in candidates:
-        score = _score_commander(cmd, collection_names)
+        score = _score_commander(
+            cmd, collection_names, prefetched_edhrec, prefetched_cards
+        )
         scored.append(score)
 
     scored.sort(key=lambda s: s.composite_score, reverse=True)
@@ -114,9 +126,16 @@ _COLOR_MIN_CARDS   = 20    # phải có ít nhất 20 card màu đó
 _COLOR_MIN_RATIO   = 0.03  # hoặc ít nhất 3% tổng non-land cards
 
 
-def _get_commander_cmc(commander_name: str) -> float:
-    """Lấy CMC của commander từ Scryfall cache. Default 3.0 nếu không có."""
-    row = cache.get_scryfall_card(commander_name)
+def _get_commander_cmc(
+    commander_name: str, prefetched: dict[str, dict] | None = None
+) -> float:
+    """Lấy CMC của commander từ Scryfall cache. Default 3.0 nếu không có.
+
+    `prefetched` là kết quả nạp sẵn của cả lô candidate. Chỉ query lẻ khi
+    thiếu — giữ cho CLI và các lời gọi ngoài vòng lặp vẫn chạy như cũ."""
+    row = (prefetched or {}).get(commander_name)
+    if row is None:
+        row = cache.get_scryfall_card(commander_name)
     if row and row["cmc"] is not None:
         return float(row["cmc"])
     return 3.0
@@ -229,13 +248,22 @@ def _filter_by_color_identity(
     return filtered
 
 
-def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
+def _score_commander(
+    cmd,
+    collection_names: set[str],
+    prefetched_edhrec: dict[str, list[dict]] | None = None,
+    prefetched_cards: dict[str, dict] | None = None,
+) -> CommanderScore:
     slug = cmd["slug"]
     color_identity = json.loads(cmd["color_identity"] or "[]")
     is_owned = cmd["name"] in collection_names
 
-    # Lấy EDHREC cards cho commander này (từ cache nếu có)
-    edhrec_cards = edhrec.get_commander_cards(slug)
+    # Lấy EDHREC cards cho commander này. Ưu tiên lô nạp sẵn; chỉ rơi xuống
+    # get_commander_cards() khi thiếu — hàm đó tự fetch qua mạng nếu cache
+    # miss, nên đường này chỉ dành cho CLI/seeder (cached_only=False).
+    edhrec_cards = (prefetched_edhrec or {}).get(slug)
+    if edhrec_cards is None:
+        edhrec_cards = edhrec.get_commander_cards(slug)
     edhrec_card_names = {c["card_name"] for c in edhrec_cards}
     edhrec_num_decks = edhrec_cards[0]["potential_decks"] if edhrec_cards else 0
 
@@ -271,7 +299,7 @@ def _score_commander(cmd, collection_names: set[str]) -> CommanderScore:
 
     # CMC penalty: CMC thấp → dễ cast → điểm cao hơn
     # Scale: CMC=1→1.0, CMC=4→0.7, CMC=7→0.4, CMC=10→0.1
-    cmd_cmc = _get_commander_cmc(cmd["name"])
+    cmd_cmc = _get_commander_cmc(cmd["name"], prefetched_cards)
     cmc_score = max(0.1, 1.0 - (cmd_cmc - 1) * 0.10)
 
     # Redundancy score: đo mức độ collection cover các slot thiết yếu
