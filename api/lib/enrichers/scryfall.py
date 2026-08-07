@@ -16,6 +16,7 @@ FIX 2 — Price TTL tách riêng:
 """
 
 import json
+import os
 import re
 import time
 import requests
@@ -25,6 +26,17 @@ SCRYFALL_COLLECTION_URL  = "https://api.scryfall.com/cards/collection"
 SCRYFALL_BULK_SEARCH_URL = "https://api.scryfall.com/cards/search"
 BATCH_SIZE               = 75
 SLEEP_BETWEEN_BATCHES    = 0.1
+
+# Scryfall trả 400 cho request không có User-Agent định danh — kể cả UA mặc
+# định của thư viện requests. Xem https://scryfall.com/docs/api
+# SCRYFALL_CONTACT nên đặt thành email liên hệ để Scryfall biết ai đang gọi
+# nếu cần báo vấn đề.
+HEADERS = {
+    "User-Agent": "MTGDeckBuilder/1.0 ({})".format(
+        os.getenv("SCRYFALL_CONTACT", "https://github.com/dongnguyen21196/MTGdeckbuilder")
+    ),
+    "Accept": "application/json",
+}
 
 
 def enrich_cards(card_names: list[str]) -> dict[str, dict]:
@@ -94,7 +106,7 @@ def _batch_fetch_oracle(names: list[str]) -> dict[str, dict]:
         resp = requests.post(
             SCRYFALL_COLLECTION_URL,
             json={"identifiers": [{"name": n} for n in batch]},
-            headers={"Accept": "application/json"},
+            headers=HEADERS,
             timeout=30,
         )
         resp.raise_for_status()
@@ -121,7 +133,7 @@ def _batch_fetch_prices_only(names: list[str]) -> dict[str, dict]:
         resp = requests.post(
             SCRYFALL_COLLECTION_URL,
             json={"identifiers": [{"name": n} for n in batch]},
-            headers={"Accept": "application/json"},
+            headers=HEADERS,
             timeout=30,
         )
         resp.raise_for_status()
@@ -269,7 +281,7 @@ def fetch_all_commanders() -> list[dict]:
     params = {"q": "is:commander format:commander", "order": "name", "unique": "cards"}
 
     while url:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
@@ -316,7 +328,7 @@ def fetch_banned_list() -> list[str]:
     params = {"q": "banned:commander", "unique": "cards", "order": "name"}
 
     while url:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         banned.extend(c["name"] for c in data.get("data", []))
