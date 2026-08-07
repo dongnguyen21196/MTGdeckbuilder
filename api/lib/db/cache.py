@@ -101,6 +101,9 @@ def get_pool() -> ConnectionPool:
             # để request không chết vì một kết nối đã bị server đóng.
             check=ConnectionPool.check_connection,
             kwargs={"row_factory": dict_row},
+            # Mặc định của pool là chờ 30s mới báo lỗi. Trong function có trần
+            # 60s, hỏng kết nối mà treo 30s thì coi như mất luôn request.
+            timeout=float(os.getenv("DB_CONNECT_TIMEOUT", "8")),
             open=True,
         )
     return _pool
@@ -221,7 +224,10 @@ def upsert_collection(cards: list[dict]):
                (session_id, name, oracle_name, quantity, set_code, foil, condition)
                VALUES (%(session_id)s, %(name)s, %(oracle_name)s, %(quantity)s,
                        %(set_code)s, %(foil)s, %(condition)s)""",
-            [{"session_id": sid, **c} for c in enriched],
+            # foil được importer sinh ra dạng int 0/1 (di sản SQLite). Postgres
+            # không tự ép integer sang boolean nên phải coerce ở đây — sửa ở lớp
+            # db thay vì đụng vào importer.
+            [{"session_id": sid, **c, "foil": bool(c.get("foil"))} for c in enriched],
         )
 
 
@@ -518,7 +524,8 @@ def upsert_commanders(commanders: list[dict]):
                  is_partner=EXCLUDED.is_partner,
                  partner_name=EXCLUDED.partner_name,
                  fetched_at=EXCLUDED.fetched_at""",
-            commanders,
+            # scryfall.fetch_all_commanders trả is_partner dạng int 0/1.
+            [{**c, "is_partner": bool(c.get("is_partner"))} for c in commanders],
         )
 
 
