@@ -176,12 +176,13 @@ def rank_commanders(
         raise HTTPException(409, "Collection trống. Upload CSV trước.")
 
     started = time.monotonic()
-    scores = pick_commanders(top_n=top, owned_only=ownedOnly)
+    scores = pick_commanders(top_n=top, owned_only=ownedOnly, cached_only=True)
     if not scores:
         raise HTTPException(
             404,
-            "Không tìm thấy commander phù hợp với collection. "
-            "Thử bỏ chọn 'chỉ commander đang sở hữu'.",
+            "Chưa chấm được commander nào. Hoặc collection không có commander "
+            "phù hợp, hoặc dữ liệu EDHREC cho những commander đó chưa được seed "
+            "xong. Thử bỏ chọn 'chỉ commander đang sở hữu'.",
         )
 
     decks = []

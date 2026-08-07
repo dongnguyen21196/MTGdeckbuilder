@@ -38,6 +38,7 @@ class CommanderScore:
 def pick_commanders(
     top_n: int = 5,
     owned_only: bool = False,
+    cached_only: bool = False,
 ) -> list[CommanderScore]:
     """
     Score commanders và trả về top N.
@@ -52,6 +53,8 @@ def pick_commanders(
     Args:
         top_n: số commander muốn trả về
         owned_only: chỉ xét commander đang có trong collection
+        cached_only: bỏ qua commander chưa có dữ liệu EDHREC trong cache thay
+            vì fetch qua mạng — bắt buộc bật khi chạy trong request web
     """
     collection_names = cache.get_collection_names()
     if not collection_names:
@@ -81,6 +84,18 @@ def pick_commanders(
             candidates = _filter_by_color_identity(candidates, collection_colors)
             print(f"  Color pre-filter: {before} → {len(candidates)} commanders "
                   f"(collection màu: {sorted(collection_colors)})")
+
+    # --- Pre-filter bước 3: chỉ giữ commander đã có dữ liệu EDHREC ---
+    # _score_commander gọi edhrec.get_commander_cards(), và hàm đó tự fetch qua
+    # mạng khi cache miss — mỗi lần ~1s. Với 175 candidate chưa seed thì request
+    # mất 175s, quá xa trần 60s của serverless. Web luôn chạy cached_only=True và
+    # để seeder lo phần fetch; CLI/seeder giữ mặc định False để vẫn fetch được.
+    if cached_only:
+        seeded = cache.get_edhrec_deck_counts([c["slug"] for c in candidates if c["slug"]])
+        before = len(candidates)
+        candidates = [c for c in candidates if c["slug"] in seeded]
+        if before != len(candidates):
+            print(f"  Bỏ qua {before - len(candidates)} commander chưa có dữ liệu EDHREC")
 
     print(f"  Đang score {len(candidates)} commanders...")
 
