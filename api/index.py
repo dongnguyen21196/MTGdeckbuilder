@@ -1,7 +1,7 @@
 """
 index.py — FastAPI entrypoint cho MTG Deck Builder.
 
-Vercel nạp biến `app` ở file này (xem `[tool.vercel] entrypoint` trong pyproject.toml).
+Vercel nạp biến `app` ở file này (`entrypoint: "index:app"` trong vercel.json).
 Toàn bộ logic nghiệp vụ nằm trong lib/ và được import nguyên trạng từ bản CLI cũ —
 file này chỉ là lớp HTTP mỏng.
 """
@@ -10,9 +10,15 @@ import os
 import sys
 from pathlib import Path
 
-# lib/ chứa các package engine, db, enrichers... với import tuyệt đối
-# (`from engine import ...`). Đưa lib/ lên sys.path để giữ nguyên các import đó.
-sys.path.insert(0, str(Path(__file__).parent / "lib"))
+# Không dựa vào cwd của runtime: Vercel chạy function với working directory là
+# gốc project, không phải thư mục chứa file này.
+#   api/      → routes.py, serializers.py
+#   api/lib/  → engine, db, enrichers... dùng import tuyệt đối (`from engine ...`),
+#               nên chính lib/ phải nằm trên sys.path chứ không phải api/lib.
+_HERE = Path(__file__).resolve().parent
+for _path in (_HERE, _HERE / "lib"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
