@@ -10,6 +10,11 @@ type Props = {
   onOpen: (commander: string) => void;
 };
 
+/** Dưới mức này thì deck thiên về danh sách đi mua hơn là deck dựng được. */
+const BUILDABLE_MIN = 0.5;
+
+const ownedRatio = (d: DeckSummary) => d.ownedCount / Math.max(d.cardCount, 1);
+
 export function RankedDecks({ decks, onDecks, onOpen }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +40,9 @@ export function RankedDecks({ decks, onDecks, onOpen }: Props) {
       setBusy(false);
     }
   }
+
+  // Giữ nguyên thứ hạng gốc khi tách nhóm — #3 vẫn là #3 dù nằm ở nhóm dưới.
+  const ranked = (decks ?? []).map((deck, i) => ({ deck, rank: i + 1 }));
 
   return (
     <section className="surface p-5">
@@ -91,14 +99,51 @@ export function RankedDecks({ decks, onDecks, onOpen }: Props) {
               {decks.length} deck trong {(elapsed / 1000).toFixed(1)}s
             </p>
           )}
-          <ul className="mt-2 grid gap-3">
-            {decks.map((deck, i) => (
-              <DeckRow key={deck.slug} rank={i + 1} deck={deck} onOpen={onOpen} />
-            ))}
-          </ul>
+          <DeckGroup
+            title="Dựng được ngay"
+            hint="collection lấp được từ một nửa deck trở lên"
+            items={ranked.filter((r) => ownedRatio(r.deck) >= BUILDABLE_MIN)}
+            onOpen={onOpen}
+          />
+          <DeckGroup
+            title="Cần mua nhiều"
+            hint="collection lấp được dưới một nửa deck"
+            items={ranked.filter((r) => ownedRatio(r.deck) < BUILDABLE_MIN)}
+            onOpen={onOpen}
+          />
         </>
       )}
     </section>
+  );
+}
+
+function DeckGroup({
+  title,
+  hint,
+  items,
+  onOpen,
+}: {
+  title: string;
+  hint: string;
+  items: { deck: DeckSummary; rank: number }[];
+  onOpen: (commander: string) => void;
+}) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mt-5">
+      <h3 className="text-xs font-semibold uppercase tracking-wide">
+        {title}{" "}
+        <span className="font-normal normal-case dim">
+          ({items.length}) — {hint}
+        </span>
+      </h3>
+      <ul className="mt-2 grid gap-3">
+        {items.map(({ deck, rank }) => (
+          <DeckRow key={deck.slug} rank={rank} deck={deck} onOpen={onOpen} />
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -130,8 +175,12 @@ function DeckRow({
           </span>
         )}
         <span className="ml-auto flex items-center gap-4 font-mono text-xs tabular-nums dim">
-          <span>
-            {deck.ownedCount}/{deck.cardCount} owned
+          <span
+            className={
+              ownedRatio(deck) >= BUILDABLE_MIN ? "text-[var(--accent)]" : undefined
+            }
+          >
+            {deck.ownedCount}/{deck.cardCount} sở hữu ({pct(ownedRatio(deck))})
           </span>
           <span>{deck.totalPriceMissing > 0 ? usd(deck.totalPriceMissing) : "—"}</span>
           <button
