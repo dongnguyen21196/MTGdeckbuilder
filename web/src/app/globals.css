@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+/* Bảng màu lấy từ 5 màu mana của Magic — dùng cho pip chart và viền theo
+   color identity của commander. */
+@theme {
+  --color-mana-w: #f4efd8;
+  --color-mana-u: #7fb3d9;
+  --color-mana-b: #9c8f8a;
+  --color-mana-r: #e0866a;
+  --color-mana-g: #7fae7c;
+
+  --color-parchment: #e8e1d0;
+  --color-ink: #16130f;
+}
+
+:root {
+  --bg: #0d0b09;
+  --bg-raised: #17130f;
+  --bg-inset: #100d0b;
+  --border: #2e2620;
+  --border-strong: #453a30;
+  --text: #ece5d8;
+  --text-dim: #a1968a;
+  --accent: #c9a227;
+  --accent-dim: #7a6317;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f1e8;
+    --bg-raised: #ffffff;
+    --bg-inset: #ebe5d8;
+    --border: #d9d0bd;
+    --border-strong: #bfb39b;
+    --text: #1d1813;
+    --text-dim: #6b6154;
+    --accent: #8a6d10;
+    --accent-dim: #c9a227;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Nền giấy da mỏng — gợi cảm giác card game mà không làm nhiễu chữ. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent),
+    radial-gradient(ellipse 60% 50% at 100% 100%, color-mix(in srgb, var(--accent) 6%, transparent), transparent);
+}
+
+@utility surface {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+}
+
+@utility inset-panel {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+@utility dim {
+  color: var(--text-dim);
+}
+
+@utility hairline {
+  border-color: var(--border);
+}

@@ -171,14 +171,7 @@ def _infer_collection_colors(collection_names: set[str]) -> set[str]:
     color_counts: dict[str, int] = {c: 0 for c in "WUBRG"}
     total_non_land = 0
 
-    with cache.get_conn() as conn:
-        placeholders = ",".join("?" * len(collection_names))
-        rows = conn.execute(
-            f"""SELECT color_identity, type_line
-                FROM scryfall_cards
-                WHERE name IN ({placeholders})""",
-            list(collection_names),
-        ).fetchall()
+    rows = cache.get_collection_color_rows(list(collection_names))
 
     for row in rows:
         type_line = row["type_line"] or ""

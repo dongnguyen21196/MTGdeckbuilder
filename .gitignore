@@ -1,38 +1,34 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 *.so
-*.egg
 *.egg-info/
 dist/
 build/
-.eggs/
 
 # Virtual environments
 venv/
 env/
 .venv/
-.env/
 
 # Environment & secrets — KHÔNG bao giờ commit file này
 .env
+.env*.local
 
-# Database & cache — dữ liệu local, không cần commit
-data/*.db
-data/*.sqlite
+# Node / Next.js
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# Vercel
+.vercel/
 
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo
 .DS_Store
 
 # Logs
 *.log
-
-# Output files
-*.txt.out
-buylist_*.csv
