@@ -6,6 +6,7 @@ session, gọi hàm engine, và serialize kết quả.
 """
 
 import io
+import os
 import secrets
 import time
 
@@ -26,6 +27,10 @@ SESSION_COOKIE = "mtg_sid"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 ngày
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024   # CSV collection lớn nhất ~2MB
 
+# Cookie Secure không gửi được qua http:// nên local dev sẽ mất session.
+# Trên Vercel luôn là https.
+COOKIE_SECURE = os.getenv("VERCEL") is not None
+
 
 # ── Session ───────────────────────────────────────────────────────────────────
 
@@ -41,7 +46,7 @@ def _bind_session(request: Request, response: Response) -> str:
             max_age=SESSION_MAX_AGE,
             httponly=True,
             samesite="lax",
-            secure=True,
+            secure=COOKIE_SECURE,
         )
     cache.set_session(sid)
     return sid
