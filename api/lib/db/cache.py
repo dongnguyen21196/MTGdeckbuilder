@@ -34,6 +34,7 @@ Giữ nguyên từ bản SQLite:
 
 import contextvars
 import os
+import re
 from contextlib import contextmanager
 
 import psycopg
@@ -556,9 +557,31 @@ def get_db_stats() -> dict:
 
 def ping() -> bool:
     """Kiểm tra DB sống. Không tạo schema, không ghi gì."""
+    return diagnose()["connected"]
+
+
+_DSN_PATTERN = re.compile(r"postgres(?:ql)?://[^\s\"']+", re.I)
+
+
+def diagnose() -> dict:
+    """Vì sao không kết nối được. `/api/health` trả về khi DB chết —
+    trên Vercel không đọc được log nên thông tin này phải nằm trong response.
+
+    Message của psycopg có thể chứa nguyên DSN (kèm password), nên phải scrub
+    trước khi trả ra ngoài."""
+    dsn_var = next(
+        (v for v in ("DATABASE_URL", "POSTGRES_URL") if os.getenv(v)), None
+    )
+    result = {"connected": False, "dsnVar": dsn_var, "error": None}
+    if not dsn_var:
+        result["error"] = "Không thấy DATABASE_URL hoặc POSTGRES_URL trong môi trường"
+        return result
+
     try:
         with cursor() as cur:
             cur.execute("SELECT 1")
-            return cur.fetchone() is not None
-    except (psycopg.Error, RuntimeError):
-        return False
+            result["connected"] = cur.fetchone() is not None
+    except Exception as e:  # noqa: BLE001 — health check phải báo được mọi lỗi
+        scrubbed = _DSN_PATTERN.sub("<dsn>", str(e))
+        result["error"] = f"{type(e).__name__}: {scrubbed[:300]}"
+    return result

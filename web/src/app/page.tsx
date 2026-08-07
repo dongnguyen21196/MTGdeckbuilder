@@ -70,14 +70,20 @@ export default function Home() {
 /** Chừng nào seed chưa chạy xong thì phần chấm điểm sẽ không có gì để đọc —
  *  nói thẳng ra thay vì để người dùng bấm rồi nhận lỗi rỗng. */
 function SeedBanner({ health, failed }: { health: Health | null; failed: boolean }) {
-  if (failed)
+  if (failed || health?.database === "disconnected")
     return (
-      <p className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-        Không kết nối được backend. Kiểm tra biến <code>DATABASE_URL</code> trong Vercel.
-      </p>
+      <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+        <p>
+          Không kết nối được database. Kiểm tra biến <code>DATABASE_URL</code> trong
+          Vercel.
+        </p>
+        {health?.error && (
+          <p className="mt-1.5 font-mono text-xs opacity-80">{health.error}</p>
+        )}
+      </div>
     );
 
-  if (!health || health.ready) return null;
+  if (!health || health.ready || !health.seed) return null;
 
   return (
     <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">

@@ -10,6 +10,7 @@ import os
 import secrets
 import time
 
+import psycopg
 from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
@@ -55,11 +56,24 @@ def _bind_session(request: Request, response: Response) -> str:
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @router.get("/health")
-def health():
-    """Trạng thái DB + độ tươi của dữ liệu seed. Không cần session."""
-    if not cache.ping():
-        raise HTTPException(503, "Không kết nối được database")
-    stats = cache.get_db_stats()
+def health(response: Response):
+    """Trạng thái DB + độ tươi của dữ liệu seed. Không cần session.
+
+    Trả 200 kèm lý do khi DB hỏng thay vì 503 trần — trên Vercel không đọc
+    được log function, nên chẩn đoán phải nằm trong chính response."""
+    diag = cache.diagnose()
+    if not diag["connected"]:
+        response.status_code = 503
+        return {"status": "error", "database": "disconnected", "ready": False, **diag}
+
+    try:
+        stats = cache.get_db_stats()
+    except psycopg.errors.UndefinedTable:
+        # Database mới toanh, seeder chưa chạy lần nào. Schema là DDL idempotent
+        # nên tạo luôn ở đây, khỏi bắt người dùng làm thêm một bước thủ công.
+        cache.init_db()
+        stats = cache.get_db_stats()
+
     return {
         "status": "ok",
         "database": "connected",

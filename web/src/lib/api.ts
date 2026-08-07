@@ -89,7 +89,10 @@ export type Health = {
   status: string;
   database: string;
   ready: boolean;
-  seed: {
+  /** Chỉ có khi database hỏng — lý do đã được scrub khỏi DSN. */
+  error?: string | null;
+  dsnVar?: string | null;
+  seed?: {
     commanders: number;
     commandersSeeded: number;
     bannedCards: number;
@@ -130,7 +133,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => request<Health>("/api/health"),
+  // 503 vẫn trả body chẩn đoán có ích, nên đọc thẳng thay vì để request() ném.
+  health: async (): Promise<Health> => {
+    const res = await fetch("/api/health", { credentials: "same-origin" });
+    return res.json() as Promise<Health>;
+  },
 
   getCollection: () => request<CollectionState>("/api/collection"),
 
