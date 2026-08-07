@@ -156,9 +156,19 @@ export const api = {
   },
 
   rank: (top: number, ownedOnly: boolean) =>
-    request<{ decks: DeckSummary[]; candidatesScored: number; elapsedMs: number }>(
-      `/api/commanders/rank?top=${top}&ownedOnly=${ownedOnly}`,
-    ),
+    request<{
+      decks: DeckSummary[];
+      /** Số commander thực sự được chấm điểm, không phải số deck trả về. */
+      candidatesScored: number;
+      /** Số còn lại sau từng bước lọc — dùng để chẩn đoán khi kết quả rỗng. */
+      funnel: Partial<{
+        totalCommanders: number;
+        afterOwnershipFilter: number;
+        afterColorFilter: number;
+        scored: number;
+      }>;
+      elapsedMs: number;
+    }>(`/api/commanders/rank?top=${top}&ownedOnly=${ownedOnly}`),
 
   build: (commander: string, partner?: string) =>
     request<BuildResult>("/api/decks/build", {

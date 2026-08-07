@@ -179,7 +179,10 @@ def rank_commanders(
         raise HTTPException(409, "Collection trống. Upload CSV trước.")
 
     started = time.monotonic()
-    scores = pick_commanders(top_n=top, owned_only=ownedOnly, cached_only=True)
+    pick_stats: dict = {}
+    scores = pick_commanders(
+        top_n=top, owned_only=ownedOnly, cached_only=True, stats=pick_stats
+    )
     if not scores:
         raise HTTPException(
             404,
@@ -198,7 +201,11 @@ def rank_commanders(
     decks.sort(key=lambda d: -d["score"]["composite"])
     return {
         "decks": decks,
-        "candidatesScored": len(scores),
+        # Số commander thực sự được chấm điểm, kèm số còn lại sau từng bước lọc.
+        # Trước đây trả len(scores) — nhưng scores đã bị cắt còn top_n nên con
+        # số đó luôn bằng `top`, không nói lên điều gì.
+        "candidatesScored": pick_stats.get("scored", 0),
+        "funnel": pick_stats,
         "elapsedMs": int((time.monotonic() - started) * 1000),
     }
 

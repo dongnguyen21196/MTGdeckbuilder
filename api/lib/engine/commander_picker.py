@@ -39,6 +39,7 @@ def pick_commanders(
     top_n: int = 5,
     owned_only: bool = False,
     cached_only: bool = False,
+    stats: dict | None = None,
 ) -> list[CommanderScore]:
     """
     Score commanders và trả về top N.
@@ -55,10 +56,14 @@ def pick_commanders(
         owned_only: chỉ xét commander đang có trong collection
         cached_only: bỏ qua commander chưa có dữ liệu EDHREC trong cache thay
             vì fetch qua mạng — bắt buộc bật khi chạy trong request web
+        stats: dict tuỳ chọn để hàm ghi số liệu từng bước lọc vào. Giá trị trả
+            về đã bị cắt còn top_n nên người gọi không tự đếm lại được.
     """
     collection_names = cache.get_collection_names()
     if not collection_names:
         raise RuntimeError("Collection trống. Chạy `python cli.py import` trước.")
+
+    counters = stats if stats is not None else {}
 
     all_commanders = cache.get_all_commanders()
     if not all_commanders:
@@ -74,6 +79,9 @@ def pick_commanders(
             continue
         candidates.append(cmd)
 
+    counters["totalCommanders"] = len(all_commanders)
+    counters["afterOwnershipFilter"] = len(candidates)
+
     # --- Pre-filter bước 2: theo color identity của collection ---
     # Chỉ áp dụng khi không phải owned_only (đã filter rồi)
     # và khi collection đủ lớn để có ý nghĩa
@@ -84,6 +92,7 @@ def pick_commanders(
             candidates = _filter_by_color_identity(candidates, collection_colors)
             print(f"  Color pre-filter: {before} → {len(candidates)} commanders "
                   f"(collection màu: {sorted(collection_colors)})")
+    counters["afterColorFilter"] = len(candidates)
 
     # --- Pre-filter bước 3: chỉ giữ commander đã có dữ liệu EDHREC ---
     # _score_commander gọi edhrec.get_commander_cards(), và hàm đó tự fetch qua
@@ -97,6 +106,7 @@ def pick_commanders(
         if before != len(candidates):
             print(f"  Bỏ qua {before - len(candidates)} commander chưa có dữ liệu EDHREC")
 
+    counters["scored"] = len(candidates)
     print(f"  Đang score {len(candidates)} commanders...")
 
     # --- Nạp sẵn dữ liệu cho cả vòng lặp ---
