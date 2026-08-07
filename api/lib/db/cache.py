@@ -270,8 +270,14 @@ def _resolve_oracle_names(cards: list[dict]) -> list[dict]:
 
 def refresh_collection_oracle_names():
     """Cập nhật oracle_name cho collection dựa trên cache Scryfall.
-    Gọi sau import + enrich để dedup reprint chính xác."""
-    sid = current_session()
+    Gọi sau import + enrich để dedup reprint chính xác.
+
+    Không có session thì không có collection nào trong tầm — seeder gọi
+    enrich_cards() ngoài request context và enrich_cards() lại gọi hàm này ở
+    bên trong. Bỏ qua thay vì ném lỗi."""
+    sid = _session.get()
+    if not sid:
+        return
     with cursor() as cur:
         cur.execute(
             """UPDATE collection c
@@ -340,28 +346,50 @@ def get_scryfall_cards(names: list[str]) -> dict[str, dict]:
         return {r["name"]: r for r in cur.fetchall()}
 
 
-def upsert_scryfall_card(data: dict):
-    """Upsert oracle data. Prices lưu riêng qua upsert_price()."""
+_UPSERT_CARD_SQL = """
+    INSERT INTO scryfall_cards
+       (name, oracle_id, oracle_name, mana_cost, cmc, type_line, oracle_text,
+        color_identity, keywords, legalities, scryfall_id, fetched_at)
+       VALUES (%(name)s, %(oracle_id)s, %(oracle_name)s, %(mana_cost)s, %(cmc)s,
+               %(type_line)s, %(oracle_text)s, %(color_identity)s, %(keywords)s,
+               %(legalities)s, %(scryfall_id)s, now())
+       ON CONFLICT (name) DO UPDATE SET
+         oracle_id=EXCLUDED.oracle_id,
+         oracle_name=EXCLUDED.oracle_name,
+         mana_cost=EXCLUDED.mana_cost,
+         cmc=EXCLUDED.cmc,
+         type_line=EXCLUDED.type_line,
+         oracle_text=EXCLUDED.oracle_text,
+         color_identity=EXCLUDED.color_identity,
+         keywords=EXCLUDED.keywords,
+         legalities=EXCLUDED.legalities,
+         fetched_at=EXCLUDED.fetched_at"""
+
+
+def upsert_scryfall_cards(cards: list[dict]):
+    """Batch của upsert_scryfall_card.
+
+    Mỗi lần gọi cursor() là một lượt checkout pool + một transaction riêng.
+    Ghi 500 card thành 500 lượt như vậy qua mạng thì mất hàng chục giây —
+    executemany gộp lại thành một."""
+    if not cards:
+        return
     with cursor() as cur:
-        cur.execute(
-            """INSERT INTO scryfall_cards
-               (name, oracle_id, oracle_name, mana_cost, cmc, type_line, oracle_text,
-                color_identity, keywords, legalities, scryfall_id, fetched_at)
-               VALUES (%(name)s, %(oracle_id)s, %(oracle_name)s, %(mana_cost)s, %(cmc)s,
-                       %(type_line)s, %(oracle_text)s, %(color_identity)s, %(keywords)s,
-                       %(legalities)s, %(scryfall_id)s, now())
-               ON CONFLICT (name) DO UPDATE SET
-                 oracle_id=EXCLUDED.oracle_id,
-                 oracle_name=EXCLUDED.oracle_name,
-                 mana_cost=EXCLUDED.mana_cost,
-                 cmc=EXCLUDED.cmc,
-                 type_line=EXCLUDED.type_line,
-                 oracle_text=EXCLUDED.oracle_text,
-                 color_identity=EXCLUDED.color_identity,
-                 keywords=EXCLUDED.keywords,
-                 legalities=EXCLUDED.legalities,
-                 fetched_at=EXCLUDED.fetched_at""",
-            data,
+        cur.executemany(_UPSERT_CARD_SQL, cards)
+
+
+def upsert_prices(rows: list[dict]):
+    """Batch của upsert_price. rows: [{oracle_name, usd, usd_foil, eur}, ...]"""
+    if not rows:
+        return
+    with cursor() as cur:
+        cur.executemany(
+            """INSERT INTO scryfall_prices (oracle_name, usd, usd_foil, eur, updated_at)
+               VALUES (%(oracle_name)s, %(usd)s, %(usd_foil)s, %(eur)s, now())
+               ON CONFLICT (oracle_name) DO UPDATE SET
+                 usd=EXCLUDED.usd, usd_foil=EXCLUDED.usd_foil,
+                 eur=EXCLUDED.eur, updated_at=EXCLUDED.updated_at""",
+            rows,
         )
 
 
@@ -397,18 +425,6 @@ def get_collection_color_rows(names: list[str]) -> list[dict]:
 
 
 # ── Scryfall prices (TTL ngắn hơn oracle data) ────────────────────────────────
-
-def upsert_price(oracle_name: str, usd: str | None, usd_foil: str | None, eur: str | None):
-    with cursor() as cur:
-        cur.execute(
-            """INSERT INTO scryfall_prices (oracle_name, usd, usd_foil, eur, updated_at)
-               VALUES (%s, %s, %s, %s, now())
-               ON CONFLICT (oracle_name) DO UPDATE SET
-                 usd=EXCLUDED.usd, usd_foil=EXCLUDED.usd_foil,
-                 eur=EXCLUDED.eur, updated_at=EXCLUDED.updated_at""",
-            (oracle_name, usd, usd_foil, eur),
-        )
-
 
 def get_price_usd(oracle_name: str) -> float | None:
     """Giá USD dạng float. None nếu chưa có hoặc đã stale."""

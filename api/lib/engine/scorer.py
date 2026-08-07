@@ -90,13 +90,16 @@ def score_deck(deck: BuiltDeck) -> DeckScoreBreakdown:
 
 
 def _load_oracle_texts(card_names: list[str]) -> dict[str, str]:
-    """Đọc oracle text từ SQLite cache cho tất cả cards."""
-    texts = {}
-    for name in card_names:
-        row = cache.get_scryfall_card(name)
-        if row and row["oracle_text"]:
-            texts[name] = row["oracle_text"]
-    return texts
+    """Đọc oracle text từ cache cho tất cả cards.
+
+    Một query cho cả 99 card thay vì 99 query — chấm 5 deck mà làm từng card
+    thì thành ~500 lượt đi lại tới Postgres."""
+    rows = cache.get_scryfall_cards(card_names)
+    return {
+        name: row["oracle_text"]
+        for name, row in rows.items()
+        if row["oracle_text"]
+    }
 
 
 def _to_grade(score: float) -> str:

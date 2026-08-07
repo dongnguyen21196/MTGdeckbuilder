@@ -50,50 +50,57 @@ def enrich_cards(card_names: list[str]) -> dict[str, dict]:
     Returns:
         dict: {card_name: merged_data_with_price}
     """
+    # Mọi truy cập cache ở đây đều theo lô. Bản SQLite query từng card trong
+    # ba vòng lặp riêng — với file local thì không sao, nhưng qua mạng tới
+    # Postgres thì một lần build deck 700 card thành ~2.800 round trip.
+    # Kết quả không đổi, chỉ đổi số lượt đi lại.
+
     # Pass 1: Oracle data
     missing_oracle = cache.get_missing_scryfall_cards(card_names)
     if missing_oracle:
         print(f"  Fetching oracle data: {len(missing_oracle)} cards từ Scryfall...")
         fetched = _batch_fetch_oracle(missing_oracle)
+        new_prices = []
         for data in fetched.values():
-            cache.upsert_scryfall_card(data)
             # Lưu price từ cùng response luôn (tận dụng API call)
             oracle_name = data.get("oracle_name") or data["name"]
             prices = data.pop("_prices", {})
-            cache.upsert_price(oracle_name, prices.get("usd"), prices.get("usd_foil"), prices.get("eur"))
+            new_prices.append({
+                "oracle_name": oracle_name,
+                "usd":         prices.get("usd"),
+                "usd_foil":    prices.get("usd_foil"),
+                "eur":         prices.get("eur"),
+            })
+        cache.upsert_scryfall_cards(list(fetched.values()))
+        cache.upsert_prices(new_prices)
         # Sau khi có oracle_name mới, cập nhật collection oracle mapping
         cache.refresh_collection_oracle_names()
 
+    rows = cache.get_scryfall_cards(card_names)
+    oracle_of = {name: (row["oracle_name"] or name) for name, row in rows.items()}
+
     # Pass 2: Price refresh cho cards đã có oracle nhưng giá stale
-    all_oracle_names = []
-    for name in card_names:
-        row = cache.get_scryfall_card(name)
-        if row:
-            all_oracle_names.append(row["oracle_name"] or name)
-
-    stale_prices = cache.get_stale_price_cards(list(set(all_oracle_names)))
+    stale_prices = set(cache.get_stale_price_cards(list(set(oracle_of.values()))))
     if stale_prices:
-        # Lấy printing names tương ứng để fetch
-        stale_printing_names = []
-        for name in card_names:
-            row = cache.get_scryfall_card(name)
-            if row and (row["oracle_name"] or name) in stale_prices:
-                stale_printing_names.append(name)
-
+        stale_printing_names = [
+            name for name in card_names if oracle_of.get(name) in stale_prices
+        ]
         if stale_printing_names:
             print(f"  Refreshing prices: {len(stale_printing_names)} cards...")
             price_data = _batch_fetch_prices_only(stale_printing_names)
-            for oracle_name, prices in price_data.items():
-                cache.upsert_price(oracle_name, prices.get("usd"), prices.get("usd_foil"), prices.get("eur"))
+            cache.upsert_prices([
+                {"oracle_name": oracle_name, **prices}
+                for oracle_name, prices in price_data.items()
+            ])
 
     # Assemble kết quả từ cache
+    price_of = cache.get_prices_usd(list(set(oracle_of.values())))
     result = {}
     for name in card_names:
-        row = cache.get_scryfall_card(name)
+        row = rows.get(name)
         if row:
             d = dict(row)
-            oracle_name = d.get("oracle_name") or name
-            d["price_usd"] = cache.get_price_usd(oracle_name)
+            d["price_usd"] = price_of.get(oracle_of[name])
             result[name] = d
     return result
 
